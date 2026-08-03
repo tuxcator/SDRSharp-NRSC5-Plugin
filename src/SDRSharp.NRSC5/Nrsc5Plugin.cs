@@ -13,9 +13,9 @@ public sealed class Nrsc5Plugin : ISharpPlugin, ICanLazyLoadGui, ISupportStatus,
     private AudioHook? _audioHook;
     private Nrsc5Panel? _panel;
 
-    public string DisplayName => "NRSC-5 HD Radio";
+    public string DisplayName => "NRSC-5 HD Radio by tuxcator";
     public string Category => "Digital Radio";
-    public string MenuItemName => "NRSC-5 HD Radio";
+    public string MenuItemName => "NRSC-5 HD Radio by tuxcator";
     public bool IsActive => _panel is { Visible: true };
 
     public UserControl Gui
