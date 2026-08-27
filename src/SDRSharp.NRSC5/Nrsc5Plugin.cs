@@ -12,6 +12,7 @@ public sealed class Nrsc5Plugin : ISharpPlugin, ICanLazyLoadGui, ISupportStatus,
     private IqHook? _iqHook;
     private AudioHook? _audioHook;
     private Nrsc5Panel? _panel;
+    private long _lastFrequency;
 
     public string DisplayName => "NRSC-5 HD Radio by tuxcator";
     public string Category => "Digital Radio";
@@ -30,6 +31,7 @@ public sealed class Nrsc5Plugin : ISharpPlugin, ICanLazyLoadGui, ISupportStatus,
     public void Initialize(ISharpControl control)
     {
         _control = control;
+        _lastFrequency = control.Frequency;
         _engine = new Nrsc5Engine();
         _engine.SetTuningOffset(control.Frequency - control.CenterFrequency);
         _iqHook = new IqHook(_engine);
@@ -44,7 +46,7 @@ public sealed class Nrsc5Plugin : ISharpPlugin, ICanLazyLoadGui, ISupportStatus,
         if (_panel is null)
         {
             if (_control is null || _engine is null)
-                throw new InvalidOperationException("El plugin aun no fue inicializado por SDR#.");
+                throw new InvalidOperationException("The plugin has not been initialized by SDR# yet.");
 
             _panel = new Nrsc5Panel(_control, _engine);
         }
@@ -66,16 +68,26 @@ public sealed class Nrsc5Plugin : ISharpPlugin, ICanLazyLoadGui, ISupportStatus,
         _iqHook = null;
         _audioHook = null;
         _control = null;
+        _lastFrequency = 0;
     }
 
     private void ControlOnPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_control is null || _engine is null) return;
 
-        if (e.PropertyName is nameof(ISharpControl.Frequency) or nameof(ISharpControl.CenterFrequency))
+        if (e.PropertyName == nameof(ISharpControl.Frequency))
         {
+            var frequency = _control.Frequency;
+            _engine.SetTuningOffset(frequency - _control.CenterFrequency);
+            if (frequency == _lastFrequency) return;
+            _lastFrequency = frequency;
+            _engine.NotifyFrequencyChanged(frequency);
+        }
+        else if (e.PropertyName == nameof(ISharpControl.CenterFrequency))
+        {
+            // Recentring the SDR spectrum changes only the digital mixer offset.
+            // It must not restart the NRSC-5 decoder or flush buffered HD audio.
             _engine.SetTuningOffset(_control.Frequency - _control.CenterFrequency);
-            _engine.NotifyFrequencyChanged(_control.Frequency);
         }
     }
 }

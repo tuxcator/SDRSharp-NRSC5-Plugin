@@ -13,9 +13,16 @@ Plugin experimental e independiente para decodificar emisiones FM HD Radio/NRSC-
 - Captura IQ crudo mediante la API oficial de plugins de SDR#.
 - Centra digitalmente el VFO seleccionado y remuestrea a 744187.5 muestras complejas por segundo.
 - Alimenta `libnrsc5` mediante `nrsc5_open_pipe` y `nrsc5_pipe_samples_cf32`.
-- Muestra sincronizacion, MER, BER, nombre de estación, título y artista.
+- Muestra sincronizacion, MER, BER, nombre de estación, título, artista y álbum.
+- Recibe y muestra el Artwork de la canción y el logotipo de la emisora mediante eventos
+  ID3/XHDR y archivos LOT, con resolución por prioridad cuando la emisora no envía XHDR.
+- Buffer de audio HD opcional y ajustable por segundos, con indicador de llenado.
+- Monitor profesional con potencia dBFS, dBm estimado/calibrable, SNR/MER, MER lateral, BER y bitrate HDC real.
+- Interfaz universal en inglés y selector intuitivo Previous/Next que recorre únicamente los subcanales que la emisora transmite, descubiertos por la tabla SIG.
+- Diseño responsivo sin scroll interno: el Artwork cuadrado y las métricas ampliadas se ajustan proporcionalmente al tamaño del panel.
 - Permite seleccionar HD1 a HD8.
 - Reemplaza el audio analógico con PCM HD cuando existe sincronía y vuelve al analógico cuando se pierde.
+- Estabiliza el audio HD con prebúfer inicial de aproximadamente 743 ms, tolerancia de 1.5 s ante pérdidas breves de sincronía y recentrado del espectro sin reiniciar el decodificador y recuperación inmediata tras un underflow breve.
 - Diseñado inicialmente para SDR# x64 con Airspy HF+ Discovery a 768 kS/s. RTL-SDR debe usar al menos 1.024 MS/s.
 
 ## Compilar
@@ -61,8 +68,10 @@ También puede arrastrar la carpeta de SDR# sobre `Instalar.cmd`. El instalador 
 3. Configure ancho RF suficiente para toda la señal híbrida, aproximadamente 400 kHz.
 4. Airspy HF+: use 768 kS/s. RTL-SDR: use 1.024 o 1.2 MS/s.
 5. Abra **Digital Radio > NRSC-5 HD Radio**.
-6. Seleccione HD1, HD2, etc. y active **Decodificar HD Radio**.
-7. Mantenga habilitado **Usar audio HD al sincronizar** para el cambio automático analógico/HD.
+6. Seleccione HD1, HD2, etc. y active **Enable HD Radio decoding**.
+7. Mantenga habilitado **Automatic HD audio** para el cambio automático analógico/HD.
+8. Ajuste **Audio buffer** según su enlace: más segundos absorben mejor los cortes breves,
+   menos segundos reducen la latencia. Desactive la casilla para latencia mínima.
 
 ## Smart App Control de Windows 11
 
@@ -70,7 +79,6 @@ El plugin y el runtime nativo se compilan localmente y no tienen una firma comer
 
 ## Limitaciones conocidas
 
-- La primera versión incluye remuestreo lineal optimizado para la tasa de 768 kS/s del Airspy HF+. Para tasas RTL muy altas se añadirá un decimador FIR polifásico.
 - El runtime nativo incluido es Win64; SDR# x86 requiere compilar nrsc5 y sus dependencias para 32 bits.
 - La recepción depende de que la emisora transmita NRSC-5 y de que ambas bandas laterales digitales tengan MER suficiente.
 - El plugin no transmite, cifra ni evita controles de acceso. Solo decodifica emisiones recibidas legalmente.

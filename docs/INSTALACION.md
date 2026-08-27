@@ -95,6 +95,35 @@ Las DLL nativas deben permanecer fuera de `Plugins`. SDR# examina recursivamente
 
 La sincronización depende de recibir correctamente ambas bandas laterales digitales. Una señal analógica fuerte no garantiza suficiente MER para HD Radio.
 
+## Monitor profesional y Artwork
+
+El panel muestra de forma separada:
+
+- Potencia RF medida en dBFS sobre el IQ recibido.
+- Nivel dBm estimado. Ajuste **dBm** usando una señal de referencia conocida; este valor no sustituye un medidor RF calibrado.
+- SNR derivado del promedio MER de ambas bandas laterales.
+- MER inferior/superior y BER.
+- Bitrate real de los paquetes HDC del subcanal seleccionado.
+- Información continua de tasa IQ, desplazamiento VFO y pico dBFS sin carga FFT adicional.
+- Estado del buffer HD y lista de los subcanales que la emisora transmite realmente.
+- Artwork transmitido por la emisora mediante ID3/XHDR y LOT, centrado en un marco cuadrado y corregido según su orientación EXIF. Si la emisora no envía carátula de canción se muestra su logotipo, y si no envía ninguna imagen aparece el marcador HD Artwork.
+
+### Buffer de audio HD
+
+La casilla **Buffer** activa un prebúfer ajustable entre 0.1 y 10 segundos. Más segundos absorben
+mejor los desvanecimientos breves; menos segundos reducen la latencia frente al audio analógico.
+Al desactivar la casilla el audio HD arranca con el primer bloque decodificado. La línea de estado
+indica el llenado actual contra el objetivo y se pone en color cuando ya alcanzó el umbral.
+
+La tolerancia ante pérdida de sincronía nunca es menor que el buffer configurado, de modo que subir
+el buffer también hace más paciente el retorno automático al audio analógico.
+
+### Selección de subcanales
+
+**Previous** y **Next** recorren únicamente los subcanales anunciados por la tabla SIG de la emisora
+y por los descriptores de servicio de audio. Mientras no llegue esa información el selector recorre
+HD1 a HD8 de forma cíclica para no dejarlo atrapado en HD1.
+
 ## 8. Solución de problemas
 
 | Síntoma | Causa probable | Solución |

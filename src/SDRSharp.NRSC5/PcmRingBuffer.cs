@@ -3,19 +3,40 @@ namespace SDRSharp.NRSC5;
 internal sealed class PcmRingBuffer
 {
     private readonly object _gate = new();
-    private readonly float[] _samples;
+    private float[] _samples;
     private int _read;
     private int _write;
     private int _count;
 
     public PcmRingBuffer(int frames)
     {
-        _samples = new float[Math.Max(4096, frames * 2)];
+        _samples = new float[Capacity(frames)];
     }
 
     public int AvailableFrames
     {
         get { lock (_gate) return _count / 2; }
+    }
+
+    public int CapacityFrames
+    {
+        get { lock (_gate) return _samples.Length / 2; }
+    }
+
+    /// <summary>
+    /// Grows the ring so it can hold <paramref name="frames"/> stereo frames. Used when
+    /// the user raises the audio buffer length; shrinking is not worth the discontinuity,
+    /// so the ring only ever grows during a session.
+    /// </summary>
+    public void EnsureCapacityFrames(int frames)
+    {
+        var wanted = Capacity(frames);
+        lock (_gate)
+        {
+            if (_samples.Length >= wanted) return;
+            _samples = new float[wanted];
+            _read = _write = _count = 0;
+        }
     }
 
     public void Write(short[] source)
@@ -65,4 +86,6 @@ internal sealed class PcmRingBuffer
             _read = _write = _count = 0;
         }
     }
+
+    private static int Capacity(int frames) => Math.Max(4096, frames * 2);
 }
