@@ -1,88 +1,135 @@
 # SDRSharp NRSC-5 HD Radio Plugin
 
-Plugin experimental e independiente para decodificar emisiones FM HD Radio/NRSC-5 dentro de SDR# sin abrir el Airspy HF+ o RTL-SDR una segunda vez.
+An independent, experimental plugin that decodes FM HD Radio/NRSC-5 broadcasts inside SDR#, without
+opening the Airspy HF+ or RTL-SDR a second time. It taps the IQ stream SDR# is already receiving,
+so the receiver stays under SDR#'s control while the plugin decodes the digital sidebands alongside
+the analog audio.
 
-## Documentación
+*[Versión en español](README.es.md)*
 
-- [Instalación completa en Windows](docs/INSTALACION.md)
-- [Historial de cambios](CHANGELOG.md)
-- Los paquetes listos para instalar se publican en [Releases](https://github.com/tuxcator/SDRSharp-NRSC5-Plugin/releases).
+## Documentation
 
-## Estado de la version 0.1.0
+- [Full installation guide](docs/INSTALLATION.md)
+- [Guía de instalación en español](docs/INSTALACION.md)
+- [Changelog](CHANGELOG.md)
+- Ready-to-install packages are published under [Releases](https://github.com/tuxcator/SDRSharp-NRSC5-Plugin/releases).
 
-- Captura IQ crudo mediante la API oficial de plugins de SDR#.
-- Centra digitalmente el VFO seleccionado y remuestrea a 744187.5 muestras complejas por segundo.
-- Alimenta `libnrsc5` mediante `nrsc5_open_pipe` y `nrsc5_pipe_samples_cf32`.
-- Muestra sincronizacion, MER, BER, nombre de estación, título, artista y álbum.
-- Recibe y muestra el Artwork de la canción y el logotipo de la emisora mediante eventos
-  ID3/XHDR y archivos LOT, con resolución por prioridad cuando la emisora no envía XHDR.
-- Buffer de audio HD opcional y ajustable por segundos, con indicador de llenado.
-- Monitor profesional con potencia dBFS, dBm estimado/calibrable, SNR/MER, MER lateral, BER y bitrate HDC real.
-- Interfaz universal en inglés y selector intuitivo Previous/Next que recorre únicamente los subcanales que la emisora transmite, descubiertos por la tabla SIG.
-- Diseño responsivo sin scroll interno: el Artwork cuadrado y las métricas ampliadas se ajustan proporcionalmente al tamaño del panel.
-- Permite seleccionar HD1 a HD8.
-- Reemplaza el audio analógico con PCM HD cuando existe sincronía y vuelve al analógico cuando se pierde.
-- Estabiliza el audio HD con prebúfer inicial de aproximadamente 743 ms, tolerancia de 1.5 s ante pérdidas breves de sincronía y recentrado del espectro sin reiniciar el decodificador y recuperación inmediata tras un underflow breve.
-- Diseñado inicialmente para SDR# x64 con Airspy HF+ Discovery a 768 kS/s. RTL-SDR debe usar al menos 1.024 MS/s.
+## What it does
 
-## Compilar
+- Captures raw IQ through the official SDR# plugin API.
+- Digitally centres the selected VFO and resamples to 744187.5 complex samples per second.
+- Feeds `libnrsc5` through `nrsc5_open_pipe` and `nrsc5_pipe_samples_cf32`.
+- Reports lock state, MER, BER, station name, title, artist and album.
+- Receives and displays song artwork and the station logo from ID3/XHDR events and LOT files, with a
+  priority fallback for stations that never send an XHDR.
+- Replaces the analog audio with HD PCM while locked, and returns to analog when the signal is lost.
+- Optional HD audio buffer, adjustable in seconds, with a fill indicator.
+- Professional monitor: dBFS power, calibrated dBm estimate, SNR/MER, per-sideband MER, BER and the
+  real HDC bitrate of the selected subchannel.
+- Subchannels HD1 to HD8, with a Previous/Next selector that steps only through the ones the station
+  actually broadcasts, discovered from the SIG table.
+- Optional surround effect that widens the HD stereo image.
+- Responsive layout with no inner scrolling: the square artwork and the metric cards scale with the
+  panel.
 
-Ejecute:
+## Requirements
+
+- 64-bit Windows 10 or 11.
+- SDR# x64 with .NET 9 plugin support (`SDRSharp.dotnet9.exe`). The package is x64 only.
+- Airspy HF+ Discovery at `768 ksps` (or `912 ksps`), or an RTL-SDR at `1.024 MS/s` or more. The
+  decoder needs at least **744.1875 kS/s** of IQ.
+- An FM station that actually broadcasts NRSC-5.
+
+## Install
+
+Close SDR#, then run:
+
+```bat
+Instalar.cmd "C:\Path\To\SDRSharp"
+```
+
+You can also drag your SDR# folder onto `Instalar.cmd`. The installer places:
+
+- `SDRSharp.NRSC5.dll` in `Plugins\SDRSharp-NRSC5-Plugin`.
+- The six native DLLs in `NRSC5Runtime`, next to the SDR# executables and outside `Plugins`, because
+  SDR# scans that folder recursively and would try to load them as managed assemblies.
+- The `Plugin.xml` entry when the SDR# build uses that file. Newer builds detect the assembly from
+  its plugin directory on their own.
+
+The [installation guide](docs/INSTALLATION.md) covers the whole process, including Windows 11 Smart
+App Control and a troubleshooting table.
+
+## Recommended setup
+
+1. Select the Airspy HF+ or RTL-SDR source in SDR#.
+2. Use `WFM` and tune the exact centre of the station, for example 103.7 MHz.
+3. Give the RF bandwidth room for the whole hybrid signal, roughly 400 kHz.
+4. Airspy HF+: `768 ksps`. RTL-SDR: `1.024` or `1.2 MS/s`.
+5. On the Airspy HF+, turn **AGC** and **Preamp** on and leave **ATT** at 0 dB. With the gain low,
+   analog FM sounds fine and RDS still decodes while the digital sidebands stay buried in the noise —
+   the most common reason HD never locks.
+6. Open **Digital Radio > NRSC-5 HD Radio by tuxcator**.
+7. Turn on **Enable HD decoding**, and leave **Auto HD audio** on so the plugin switches between
+   analog and HD by itself.
+
+## Using the panel
+
+**Subchannels.** Every station change starts on HD1: the subchannel line-up belongs to the station,
+so carrying an HD2 or HD3 choice over to a station that only broadcasts HD1 would leave the decoder
+waiting for audio that never arrives. Fine tuning the same station, under 50 kHz, keeps the
+subchannel you are on. Beyond that the selector only moves when you press **PREVIOUS** or **NEXT**.
+
+**Switching subchannels** does not let the analog programme through: the level ramps down over 20 ms,
+silence covers the buffer refill, and the new subchannel ramps back in.
+
+**Buffer.** A prebuffer adjustable between 0.1 and 10 seconds. More seconds ride out brief fades;
+fewer reduce latency against the analog audio. It also sets how patiently the plugin waits before
+falling back to analog, and how long the silent gap is when you change subchannel.
+
+**Surround.** Widens the HD stereo image: mid and side are separated, the side signal is boosted and
+mixed with a copy delayed by 14 ms, and bass below 250 Hz stays centred so the mix does not hollow
+out or cancel on a mono speaker. It only touches the codec audio, never SDR#'s analog path, and the
+centre level is left alone so it reads as width rather than as volume.
+
+## Build from source
 
 ```bat
 Compilar.cmd
 ```
 
-El script descarga el SDK oficial de SDR# y un SDK .NET 9 local. Por defecto busca el runtime Win64 de nrsc5 en una carpeta hermana:
+The script downloads the official SDR# plugin SDK and a local .NET 9 SDK, builds, runs the tests and
+produces the package in `dist\SDRSharp-NRSC5-Plugin`. By default it looks for the nrsc5 Win64 runtime
+in a sibling folder:
 
 ```text
 ..\FM-DX-Windows-Portable\runtime\nrsc5
 ```
 
-También puede indicar otra ubicación:
+To point it somewhere else:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build.ps1 -Nrsc5Runtime "C:\Ruta\A\nrsc5"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build.ps1 -Nrsc5Runtime "C:\Path\To\nrsc5"
 ```
 
-El paquete se genera en `dist\SDRSharp-NRSC5-Plugin`.
+## Windows 11 Smart App Control
 
-## Instalar
+The plugin and the native runtime are built locally and carry no commercial signature. With Smart App
+Control **On**, Windows can block `SDRSharp.NRSC5.dll` and log Code Integrity event 3077. There is no
+per-file exception: either use a build signed by an authority Microsoft recognises, or decide in
+Windows Security whether to turn that protection off. Turning it off lowers security, and Microsoft
+states it cannot be turned back on without resetting or reinstalling Windows.
 
-Cierre SDR#. Ejecute:
+## Known limitations
 
-```bat
-Instalar.cmd "C:\Ruta\A\SDRSharp"
-```
+- The bundled native runtime is Win64. SDR# x86 would need nrsc5 and its dependencies rebuilt for 32
+  bits.
+- Reception depends on the station broadcasting NRSC-5 and on both digital sidebands having enough
+  MER. A strong analog signal is no guarantee.
+- The surround setting is not persisted: every SDR# session starts with it off.
+- The plugin does not transmit, encrypt, or bypass access controls. It only decodes broadcasts that
+  are received legally.
 
-También puede arrastrar la carpeta de SDR# sobre `Instalar.cmd`. El instalador copia:
+## Licensing
 
-- `SDRSharp.NRSC5.dll` en `Plugins\SDRSharp-NRSC5-Plugin`.
-- Las seis DLL nativas necesarias en `NRSC5Runtime`, junto a los ejecutables de SDR# y fuera de `Plugins`.
-- La entrada de `Plugin.xml` cuando SDR# utiliza ese archivo. Las versiones nuevas detectan el ensamblado desde su directorio de plugins.
-
-## Uso recomendado
-
-1. Seleccione Airspy HF+ o RTL-SDR en SDR#.
-2. Use modo WFM y sintonice el centro exacto de la emisora, por ejemplo 103.7 MHz.
-3. Configure ancho RF suficiente para toda la señal híbrida, aproximadamente 400 kHz.
-4. Airspy HF+: use 768 kS/s. RTL-SDR: use 1.024 o 1.2 MS/s.
-5. Abra **Digital Radio > NRSC-5 HD Radio**.
-6. Seleccione HD1, HD2, etc. y active **Enable HD Radio decoding**.
-7. Mantenga habilitado **Automatic HD audio** para el cambio automático analógico/HD.
-8. Ajuste **Audio buffer** según su enlace: más segundos absorben mejor los cortes breves,
-   menos segundos reducen la latencia. Desactive la casilla para latencia mínima.
-
-## Smart App Control de Windows 11
-
-El plugin y el runtime nativo se compilan localmente y no tienen una firma comercial. Si Smart App Control esta en modo **Activado**, Windows puede bloquear `SDRSharp.NRSC5.dll` con el evento 3077 de Integridad de codigo. No existe una excepcion por archivo para Smart App Control: use una compilacion firmada con un certificado de una autoridad admitida o decida desde Seguridad de Windows si desea desactivar esa proteccion. Desactivarla reduce la seguridad y Microsoft indica que no puede volver a activarse sin restablecer o reinstalar Windows.
-
-## Limitaciones conocidas
-
-- El runtime nativo incluido es Win64; SDR# x86 requiere compilar nrsc5 y sus dependencias para 32 bits.
-- La recepción depende de que la emisora transmita NRSC-5 y de que ambas bandas laterales digitales tengan MER suficiente.
-- El plugin no transmite, cifra ni evita controles de acceso. Solo decodifica emisiones recibidas legalmente.
-
-## Licencias
-
-El código del plugin se distribuye bajo GPL-3.0-or-later para ser compatible con nrsc5. Los ensamblados del SDK de SDR# se descargan desde Airspy y no deben publicarse dentro del repositorio.
+The plugin code is distributed under GPL-3.0-or-later for compatibility with nrsc5. The SDR# SDK
+assemblies are downloaded from Airspy and must not be republished inside this repository.
