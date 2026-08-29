@@ -37,6 +37,7 @@ Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $dist -Force
 Copy-Item -LiteralPath (Join-Path $root 'README.es.md') -Destination $dist -Force
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $dist -Force
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Destination $dist -Force
+Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.es.md') -Destination $dist -Force
 Copy-Item -LiteralPath (Join-Path $root 'packaging\Install-Package.ps1') -Destination (Join-Path $dist 'Install-Package.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $root 'packaging\Instalar.cmd') -Destination (Join-Path $dist 'Instalar.cmd') -Force
 

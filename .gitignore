@@ -1,7 +1,9 @@
 /.cache/
 /.tools/
 /.vs/
-/dist/
+# El paquete compilado se publica dentro del repositorio; el ZIP se adjunta a la Release.
+/dist/*
+!/dist/SDRSharp-NRSC5-Plugin/
 /**/bin/
 /**/obj/
 /vendor/SDRSharpSDK/lib/*.dll

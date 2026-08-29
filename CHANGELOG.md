@@ -1,58 +1,85 @@
-# Historial de cambios
+# Changelog
 
-## Sin publicar
+*[Versión en español](CHANGELOG.es.md)*
 
-- El logotipo de la emisora ya se muestra en el recuadro de Artwork. Llegaba por LOT pero
-  ningún XHDR de ID3 lo referencia nunca, así que se guardaba en caché y jamás se pintaba.
-- El Artwork de las canciones se resuelve por prioridad: la imagen que señala el XHDR actual,
-  luego la última carátula recibida en ese subcanal y por último el logotipo de la emisora.
-  Las emisoras que envían carátula sin XHDR correspondiente ya no quedan con el recuadro vacío.
-- La caché de imágenes se indexa por puerto y LOT. Un identificador LOT solo es único dentro
-  de su servicio, de modo que antes las imágenes de dos subcanales podían pisarse entre sí.
-- Los offsets de `nrsc5_event_t` se derivan en `Nrsc5Layout` a partir de las reglas de
-  alineación de C en lugar de escribirse a mano en cada lectura, y el smoke test los compara
-  contra los valores del encabezado oficial para x64.
-- Remuestreo con filtro anti-alias polifásico de sinc enventanado en Kaiser, cuyo largo escala
-  con la razón de decimación. El rechazo fuera de banda pasa de -12 dB a -90 dB a 400 kHz con
-  RTL-SDR a 2.4 MS/s; la interpolación lineal anterior plegaba el canal adyacente sobre las
-  bandas laterales digitales.
-- La mezcla del VFO ahora ocurre a la tasa de entrada, antes de decimar, que es el único orden
-  correcto cuando hay un filtro anti-alias centrado en DC.
-- Buffer de audio HD opcional y ajustable entre 0.1 y 10 segundos, con indicador de llenado.
-  Al desactivarlo el audio HD arranca con el primer bloque decodificado para latencia mínima.
-- La tolerancia ante pérdida de sincronía nunca es menor que el buffer configurado.
-- Previous/Next recorre solo los subcanales que la emisora transmite realmente, descubiertos
-  por la tabla SIG y por los eventos de servicio de audio. El panel lista los disponibles.
-- `_hdAudioActive` se lee y escribe siempre dentro de `_audioGate`; antes lo tocaban sin
-  sincronizar el hilo de audio de SDR# y el de la interfaz.
-- Las fuentes se comparten desde `PanelFonts` en lugar de construirse por control, lo que
-  filtraba un handle GDI por etiqueta cada vez que se recreaba el panel.
-- Las guardas de regresión de `tests\Test-Project.ps1` que habían perdido las barras
-  invertidas y nunca podían fallar quedaron corregidas y verificadas contra el código previo.
+## Unreleased — development build 3.2
 
-- Artwork de canción recibido por ID3/XHDR y LOT, centrado en el monitor.
-- Artwork centrado en un marco 1:1, con ajuste Zoom y corrección de orientación EXIF.
-- Interfaz profesional oscura con tarjetas técnicas ampliadas y legibles.
-- Métricas separadas de potencia dBFS, dBm estimado/calibrable, SNR/MER, MER lateral, BER y bitrate HDC.
-- Analizador FFT eliminado para reducir carga y priorizar la información técnica de la señal.
-- Interfaz del plugin traducida completamente al inglés.
-- Selector HD1-HD8 reemplazado por botones Previous/Next y trasladado encima de Signal Analysis.
-- Scroll interno eliminado; el monitor distribuye Artwork cuadrado y métricas mediante filas proporcionales al redimensionar.
-- Prebúfer HD inicial de aproximadamente 743 ms para absorber jitter y evitar alternancias frecuentes entre audio HD y analógico.
-- Tolerancia de 1.5 segundos ante pérdidas breves de sincronía antes de vaciar el audio HD.
-- Los cambios de Center Frequency ahora actualizan únicamente el mezclador digital y no reinician el decodificador.
-- Un underflow breve conserva activa la ruta HD y ya no exige llenar nuevamente todo el prebúfer.
-- La pérdida sostenida se confirma desde el último bloque PCM digital válido, no solo desde el evento inicial de sincronía.
-- Reasignar la misma tasa IQ ya no reinicia el estado continuo del remuestreador.
+- Every station change now starts on HD1. The subchannel line-up belongs to the station, so
+  carrying an HD2 or HD3 choice over to a station that only broadcasts HD1 left the decoder
+  waiting for audio that never arrived while the analog programme played. Fine tuning the same
+  station, under 50 kHz, keeps the current subchannel, and the selector never moves on its own
+  in any other case.
+- Changing subchannel no longer lets the analog programme through. The level ramps down over
+  20 ms, silence covers the buffer refill, and the new subchannel ramps back in. The hold
+  expires after 3 seconds or the buffer plus 2 seconds, whichever is longer, so a subchannel
+  that never delivers audio cannot leave the listener in permanent silence.
+- New **Surround** button that widens the HD stereo image: mid and side are separated, the side
+  signal is boosted and mixed with a copy delayed by 14 ms, and bass below 250 Hz stays centred
+  so the mix is not hollowed out and does not cancel on a mono speaker. It only touches the HDC
+  codec audio, never SDR#'s analog path, and the centre level is left untouched so the effect
+  reads as width rather than as volume.
+- The panel header shows the development build in progress.
+- Documentation is published in English and Spanish: the English README is the repository front
+  page, `docs/INSTALLATION.md` mirrors `docs/INSTALACION.md`, and both guides now use the real
+  control names, state the 744.1875 kS/s requirement and document the Airspy HF+ gain settings.
+
+## Unreleased
+
+- The station logo is now shown in the artwork frame. It arrived over LOT but no ID3 XHDR ever
+  references it, so it was cached and never painted.
+- Song artwork is resolved by priority: the image the current XHDR points at, then the most
+  recent art seen on that subchannel, and finally the station logo. Stations that send art
+  without a matching XHDR no longer leave the frame empty.
+- The image cache is keyed by port and LOT id. A LOT id is only unique within its service, so
+  images from two subchannels could previously overwrite each other.
+- The `nrsc5_event_t` offsets are derived in `Nrsc5Layout` from the C alignment rules instead of
+  being written by hand at every read, and the smoke test compares them against the values in
+  the official x64 header.
+- Resampling with a polyphase anti-alias filter of Kaiser-windowed sinc, its length scaling with
+  the decimation ratio. Out-of-band rejection goes from -12 dB to -90 dB at 400 kHz with an
+  RTL-SDR at 2.4 MS/s; the previous linear interpolation folded the adjacent channel onto the
+  digital sidebands.
+- The VFO mixing now happens at the input rate, before decimation, which is the only correct
+  order when the anti-alias filter is centred on DC.
+- Optional HD audio buffer, adjustable between 0.1 and 10 seconds, with a fill indicator. With it
+  off, HD audio starts on the first decoded block for minimum latency.
+- The tolerance for a sync loss is never shorter than the configured buffer.
+- Previous/Next steps only through the subchannels the station actually broadcasts, discovered
+  from the SIG table and the audio service events. The panel lists the available ones.
+- `_hdAudioActive` is always read and written inside `_audioGate`; the SDR# audio thread and the
+  UI thread used to touch it without synchronisation.
+- Fonts are shared from `PanelFonts` instead of being constructed per control, which leaked a GDI
+  handle per label every time the panel was rebuilt.
+- The regression guards in `tests\Test-Project.ps1` that had lost their backslashes, and could
+  therefore never fail, were fixed and verified against the previous code.
+
+- Song artwork received over ID3/XHDR and LOT, centred in the monitor.
+- Artwork centred in a 1:1 frame, with zoom fitting and EXIF orientation correction.
+- Professional dark interface with larger, legible technical cards.
+- Separate metrics for dBFS power, calibrated dBm estimate, SNR/MER, per-sideband MER, BER and
+  HDC bitrate.
+- FFT analyser removed to cut load and prioritise the technical signal information.
+- Plugin interface fully translated to English.
+- The HD1-HD8 selector replaced by Previous/Next buttons and moved above Signal Analysis.
+- Inner scrolling removed; the monitor lays out square artwork and metrics through proportional
+  rows as it is resized.
+- Initial HD prebuffer of roughly 743 ms to absorb jitter and avoid frequent switching between HD
+  and analog audio.
+- 1.5 seconds of tolerance for brief sync losses before the HD audio is flushed.
+- Center Frequency changes now update only the digital mixer and no longer restart the decoder.
+- A brief underflow keeps the HD path armed and no longer demands refilling the whole prebuffer.
+- A sustained loss is confirmed from the last valid digital PCM block, not only from the initial
+  sync event.
+- Reassigning the same IQ rate no longer resets the resampler's running state.
 
 ## 0.1.0
 
-- Primera versión independiente del plugin SDRSharp NRSC-5 para Windows x64.
-- Captura IQ desde SDR# sin abrir el receptor por segunda vez.
-- Compatibilidad inicial con Airspy HF+ Discovery y RTL-SDR.
-- Selección de servicios HD1 a HD8.
-- Audio HD con retorno automático a FM analógico.
-- Datos de sincronización, MER, BER, estación, título y artista.
-- Runtime nativo reducido a las seis DLL realmente necesarias.
-- Runtime instalado fuera de `Plugins` para evitar que SDR# examine DLL nativas.
-- Diagnóstico documentado para Smart App Control y el error `0x800711C7`.
+- First standalone release of the SDRSharp NRSC-5 plugin for Windows x64.
+- Captures IQ from SDR# without opening the receiver a second time.
+- Initial support for the Airspy HF+ Discovery and RTL-SDR.
+- Selection of HD1 to HD8 services.
+- HD audio with automatic fallback to analog FM.
+- Sync, MER, BER, station, title and artist data.
+- Native runtime reduced to the six DLLs actually needed.
+- Runtime installed outside `Plugins` so SDR# does not scan native DLLs.
+- Documented diagnostics for Smart App Control and the `0x800711C7` error.
