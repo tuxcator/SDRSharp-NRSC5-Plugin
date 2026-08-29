@@ -7,6 +7,24 @@ digitales en paralelo al audio analógico.
 
 *[English version](README.md)*
 
+## En funcionamiento
+
+![Recorrido por HD1, HD2 y HD3 en 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
+
+Recorrido por los tres subcanales de una emisora en 103.7 MHz: el Artwork, los metadatos y todo el
+análisis de señal siguen al subcanal seleccionado, y el audio no vuelve al analógico entre uno y
+otro. [Ver la captura completa de 50 segundos con audio](docs/media/demo-hd1-hd2-hd3.mp4).
+
+### Capturas de pantalla
+
+La misma emisora en cada uno de sus tres subcanales. Pulse cualquier imagen para verla completa.
+
+| HD1 · La Ke Buena | HD2 · LA AW | HD3 · Milenio Radio |
+|---|---|---|
+| [![HD1](docs/media/screenshot-hd1.png)](docs/media/screenshot-hd1.png) | [![HD2](docs/media/screenshot-hd2.png)](docs/media/screenshot-hd2.png) | [![HD3](docs/media/screenshot-hd3.png)](docs/media/screenshot-hd3.png) |
+
+Capturado con un Airspy HF+ Discovery a 912 ksps. El campo `Device SN` está enmascarado a propósito.
+
 ## Documentación
 
 - [Guía de instalación completa](docs/INSTALACION.md)
