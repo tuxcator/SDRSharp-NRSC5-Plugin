@@ -42,6 +42,13 @@ internal sealed class Nrsc5Engine : IDisposable
     private const int MinSyncLossGraceMs = 1500;
     private const int MaxArtworkBytes = 8 * 1024 * 1024;
     private const int MaxCachedImages = 24;
+    // Ramp used whenever the output changes source, short enough not to be heard as a dip.
+    private const double FadeSeconds = 0.02;
+    private const double MinSwitchHoldSeconds = 3.0;
+
+    // Anything further than this is a different station rather than a nudge to peak the
+    // current one. FM channels sit at least 100 kHz apart everywhere this decoder applies.
+    private const long StationStepHz = 50_000;
 
     internal const double MinBufferSeconds = 0.1;
     internal const double MaxBufferSeconds = 10.0;
@@ -55,6 +62,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private readonly object _bitrateGate = new();
     private readonly PcmRingBuffer _audio = new((int)(Nrsc5Native.AudioSampleRate * 3));
     private readonly PolyphaseResampler _resampler = new();
+    private readonly SurroundProcessor _surround = new();
     private readonly Nrsc5Native.EventCallback _callback;
     private readonly System.Threading.Timer _retuneTimer;
     private readonly System.Threading.Timer _syncLossTimer;
@@ -85,8 +93,12 @@ internal sealed class Nrsc5Engine : IDisposable
     private float _audioLeftA, _audioRightA, _audioLeftB, _audioRightB;
     private double _audioPhase;
     private bool _hdAudioActive;
+    private bool _switchingProgram;
+    private long _switchDeadlineTicks;
+    private float _outputGain = 1f;
     private long _lastDigitalTicks;
     private long _lastSignalTicks;
+    private long _lastTunedFrequency;
     private float _smoothedDbfs = -120;
     private float _dbmCalibrationOffset = -30;
     private long _bitrateBytes;
@@ -130,6 +142,16 @@ internal sealed class Nrsc5Engine : IDisposable
     {
         get => Volatile.Read(ref _replaceAnalogAudio);
         set => Volatile.Write(ref _replaceAnalogAudio, value);
+    }
+
+    /// <summary>
+    /// Widens the decoded HD stereo image. It only ever touches the samples this plugin
+    /// writes, so the analog audio SDR# produces on its own is left alone.
+    /// </summary>
+    public bool SurroundEnabled
+    {
+        get => _surround.Enabled;
+        set => _surround.Enabled = value;
     }
 
     /// <summary>
@@ -180,6 +202,7 @@ internal sealed class Nrsc5Engine : IDisposable
             value = Math.Clamp(value, 0, 7);
             Volatile.Write(ref _selectedProgram, value);
             ResetAudio();
+            BeginProgramSwitch();
             ResetBitrate();
             UpdateStatus(s => s with
             {
@@ -257,6 +280,14 @@ internal sealed class Nrsc5Engine : IDisposable
 
     public void NotifyFrequencyChanged(long frequency)
     {
+        // Every new station starts on HD1. The subchannel line-up belongs to the station,
+        // not to the listener, so carrying an HD2 or HD3 choice over to a station that only
+        // broadcasts HD1 just leaves the decoder waiting for audio that never comes while
+        // the analog path plays. Fine tuning the same station keeps the current subchannel.
+        var previous = Interlocked.Exchange(ref _lastTunedFrequency, frequency);
+        if (previous == 0 || Math.Abs(frequency - previous) > StationStepHz)
+            Volatile.Write(ref _selectedProgram, 0);
+
         CancelPendingSyncLoss();
         ResetAudio();
         ResetMetadata();
@@ -350,8 +381,13 @@ internal sealed class Nrsc5Engine : IDisposable
                 var startup = _bufferingEnabled
                     ? (int)(Nrsc5Native.AudioSampleRate * _bufferSeconds)
                     : 0;
-                if (available < Math.Max(required, startup)) return;
+                if (available < Math.Max(required, startup))
+                {
+                    HoldOverAnalog(buffer, frames, outputRate);
+                    return;
+                }
                 _hdAudioActive = true;
+                _switchingProgram = false;
             }
             else if (available < required)
             {
@@ -373,6 +409,8 @@ internal sealed class Nrsc5Engine : IDisposable
             }
 
             var advance = Nrsc5Native.AudioSampleRate / outputRate;
+            var gainStep = (float)(1.0 / (FadeSeconds * outputRate));
+            _surround.Configure(outputRate);
             for (var frame = 0; frame < frames; frame++)
             {
                 while (_audioPhase >= 1.0)
@@ -389,8 +427,19 @@ internal sealed class Nrsc5Engine : IDisposable
                 }
 
                 var t = (float)_audioPhase;
-                buffer[frame * 2] = _audioLeftA + (_audioLeftB - _audioLeftA) * t;
-                buffer[frame * 2 + 1] = _audioRightA + (_audioRightB - _audioRightA) * t;
+                var left = _audioLeftA + (_audioLeftB - _audioLeftA) * t;
+                var right = _audioRightA + (_audioRightB - _audioRightA) * t;
+                _surround.Process(ref left, ref right);
+                if (_outputGain < 1f)
+                {
+                    // Ramps the new subchannel in, so the switch is not a step edge.
+                    _outputGain = Math.Min(1f, _outputGain + gainStep);
+                    left *= _outputGain;
+                    right *= _outputGain;
+                }
+
+                buffer[frame * 2] = left;
+                buffer[frame * 2 + 1] = right;
                 _audioPhase += advance;
             }
         }
@@ -851,6 +900,48 @@ internal sealed class Nrsc5Engine : IDisposable
         Volatile.Write(ref _lastDigitalTicks, 0);
     }
 
+    /// <summary>
+    /// Keeps the analog path out of a subchannel change: SDR# has already written its own
+    /// audio into this block, so without it the switch bursts a fragment of the analog
+    /// programme between the two HD subchannels. The level is ramped down rather than cut,
+    /// and the hold expires so a subchannel that never delivers audio does not leave the
+    /// listener in silence.
+    /// </summary>
+    private unsafe void HoldOverAnalog(float* buffer, int frames, double outputRate)
+    {
+        if (!_switchingProgram) return;
+        if (Stopwatch.GetTimestamp() > _switchDeadlineTicks)
+        {
+            _switchingProgram = false;
+            _outputGain = 1f;
+            return;
+        }
+
+        var step = (float)(1.0 / (FadeSeconds * outputRate));
+        for (var frame = 0; frame < frames; frame++)
+        {
+            _outputGain = Math.Max(0f, _outputGain - step);
+            buffer[frame * 2] *= _outputGain;
+            buffer[frame * 2 + 1] *= _outputGain;
+        }
+    }
+
+    /// <summary>Arms the analog hold for a subchannel change, but never for a station change.</summary>
+    private void BeginProgramSwitch()
+    {
+        // Both reads take other locks, and an UpdateStatus lambda can take the audio gate,
+        // so neither may happen while this thread holds it.
+        var covering = Enabled && ReplaceAnalogAudio && Status.Synced;
+        var holdSeconds = Math.Max(MinSwitchHoldSeconds, EffectiveBufferSeconds() + 2.0);
+
+        lock (_audioGate)
+        {
+            _switchingProgram = covering;
+            _switchDeadlineTicks = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * holdSeconds);
+            if (!covering) _outputGain = 1f;
+        }
+    }
+
     private void ResetAudio()
     {
         lock (_audioGate)
@@ -859,6 +950,11 @@ internal sealed class Nrsc5Engine : IDisposable
             _haveAudioPair = false;
             _audioPhase = 0;
             _hdAudioActive = false;
+            // A station change or a stop cancels any pending subchannel hold.
+            _switchingProgram = false;
+            _outputGain = 1f;
+            // Otherwise the delay line replays a fragment of the previous station.
+            _surround.Reset();
         }
     }
 

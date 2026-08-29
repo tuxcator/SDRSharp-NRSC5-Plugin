@@ -27,13 +27,19 @@ internal static class PanelFonts
 
 internal sealed class Nrsc5Panel : UserControl
 {
+    /// <summary>Build shown in the header byline, so a tester can tell versions apart.</summary>
+    internal const string DevelopmentVersion = "3.2";
+
     private static readonly Color Background = Color.FromArgb(10, 15, 21);
     private static readonly Color Card = Color.FromArgb(21, 29, 38);
     private static readonly Color Primary = Color.FromArgb(47, 211, 198);
     private static readonly Color Secondary = Color.FromArgb(83, 159, 255);
     private static readonly Color Muted = Color.FromArgb(145, 160, 178);
 
+    private static readonly Color SurroundOn = Color.FromArgb(17, 71, 69);
+
     private readonly Nrsc5Engine _engine;
+    private readonly Button _surround = NewFlatButton("Surround");
     private readonly CheckBox _enabled = NewCheckBox("Enable HD decoding");
     private readonly CheckBox _replaceAudio = NewCheckBox("Auto HD audio", true);
     private readonly CheckBox _useBuffer = NewCheckBox("Buffer", true);
@@ -148,6 +154,12 @@ internal sealed class Nrsc5Panel : UserControl
             _bufferSeconds.Enabled = _useBuffer.Checked;
         };
         _bufferSeconds.ValueChanged += (_, _) => _engine.BufferSeconds = (double)_bufferSeconds.Value;
+        _surround.Click += (_, _) =>
+        {
+            _engine.SurroundEnabled = !_engine.SurroundEnabled;
+            ApplySurroundLook();
+        };
+        ApplySurroundLook();
 
         _engine.BufferingEnabled = _useBuffer.Checked;
         _engine.BufferSeconds = (double)_bufferSeconds.Value;
@@ -181,7 +193,7 @@ internal sealed class Nrsc5Panel : UserControl
         };
         var author = new Label
         {
-            Text = "PROFESSIONAL MONITOR · BY TUXCATOR",
+            Text = $"PROFESSIONAL MONITOR · BY TUXCATOR · DEV {DevelopmentVersion}",
             Dock = DockStyle.Bottom,
             Height = 19,
             TextAlign = ContentAlignment.TopCenter,
@@ -312,26 +324,32 @@ internal sealed class Nrsc5Panel : UserControl
         buffering.Controls.Add(NewCaption("dBm"));
         buffering.Controls.Add(_calibration);
 
-        var restart = new Button
-        {
-            Text = "Restart decoder",
-            Dock = DockStyle.Fill,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(33, 46, 59),
-            ForeColor = Color.White,
-            Font = PanelFonts.SmallButton,
-            Margin = new Padding(2, 2, 2, 1)
-        };
-        restart.FlatAppearance.BorderColor = Secondary;
+        var restart = NewFlatButton("Restart decoder");
         restart.Click += (_, _) => _engine.Restart();
+
+        // Both buttons share the last row: the panel cannot afford a fourth one.
+        var actions = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Card,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        actions.Controls.Add(restart, 0, 0);
+        actions.Controls.Add(_surround, 1, 0);
 
         container.Controls.Add(toggles, 0, 0);
         container.Controls.Add(buffering, 0, 1);
-        container.Controls.Add(restart, 0, 2);
+        container.Controls.Add(actions, 0, 2);
 
         _tips.SetToolTip(_calibration, "dBm is an estimate. Adjust this offset using a known reference signal.");
         _tips.SetToolTip(_useBuffer, "Turn off for the lowest latency. Leave on to ride out brief signal dropouts.");
         _tips.SetToolTip(_bufferSeconds, "How much HD audio to accumulate before it replaces the analog path.");
+        _tips.SetToolTip(_surround, "Widens the HD stereo image. Only affects HD audio, never the analog path.");
         return container;
     }
 
@@ -480,6 +498,35 @@ internal sealed class Nrsc5Panel : UserControl
         ForeColor = color,
         AutoEllipsis = true
     };
+
+    private static Button NewFlatButton(string text)
+    {
+        var button = new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(33, 46, 59),
+            ForeColor = Color.White,
+            Font = PanelFonts.SmallButton,
+            Margin = new Padding(2, 2, 2, 1)
+        };
+        button.FlatAppearance.BorderColor = Secondary;
+        return button;
+    }
+
+    /// <summary>
+    /// The button is its own indicator. The state is spelled out in the caption because
+    /// SDR# themes plugin controls after they are built and overrides the colours.
+    /// </summary>
+    private void ApplySurroundLook()
+    {
+        var active = _engine.SurroundEnabled;
+        _surround.Text = active ? "Surround ON" : "Surround OFF";
+        _surround.BackColor = active ? SurroundOn : Color.FromArgb(33, 46, 59);
+        _surround.ForeColor = active ? Primary : Color.White;
+        _surround.FlatAppearance.BorderColor = active ? Primary : Secondary;
+    }
 
     private static CheckBox NewCheckBox(string text, bool isChecked = false) => new()
     {

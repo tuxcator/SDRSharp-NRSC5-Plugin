@@ -1,5 +1,6 @@
 /.cache/
 /.tools/
+/.vs/
 /dist/
 /**/bin/
 /**/obj/
