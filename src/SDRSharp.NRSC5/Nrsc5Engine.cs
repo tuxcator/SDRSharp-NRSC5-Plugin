@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SDRSharp.Radio;
@@ -10,47 +11,112 @@ internal sealed record Nrsc5Status(
     string Station,
     string Title,
     string Artist,
+    string Album,
     float MerLower,
     float MerUpper,
     float Ber,
     double InputRate,
-    double OffsetHz)
+    double OffsetHz,
+    float SignalDbfs,
+    float PeakDbfs,
+    float EstimatedDbm,
+    float SnrDb,
+    float BitrateKbps,
+    byte[]? Artwork,
+    bool ArtworkIsStationLogo,
+    int ProgramMask,
+    int SelectedProgram,
+    float BufferedSeconds,
+    float BufferTargetSeconds)
 {
-    public static Nrsc5Status Idle { get; } = new(false, "Desactivado", "", "", "", 0, 0, 0, 0, 0);
+    public static Nrsc5Status Idle { get; } = new(
+        false, "Disabled", "", "", "", "", 0, 0, 0, 0, 0,
+        -120, -120, -150, 0, 0, null, false, 0, 0, 0, 0);
+
+    public bool HasProgram(int index) => (ProgramMask & (1 << index)) != 0;
 }
 
 internal sealed class Nrsc5Engine : IDisposable
 {
+    private const int SignalProbeSamples = 256;
+    private const int MinSyncLossGraceMs = 1500;
+    private const int MaxArtworkBytes = 8 * 1024 * 1024;
+    private const int MaxCachedImages = 24;
+    // Ramp used whenever the output changes source, short enough not to be heard as a dip.
+    private const double FadeSeconds = 0.02;
+    private const double MinSwitchHoldSeconds = 3.0;
+
+    // Anything further than this is a different station rather than a nudge to peak the
+    // current one. FM channels sit at least 100 kHz apart everywhere this decoder applies.
+    private const long StationStepHz = 50_000;
+
+    internal const double MinBufferSeconds = 0.1;
+    internal const double MaxBufferSeconds = 10.0;
+    internal const double DefaultBufferSeconds = 0.75;
+
     private readonly object _sessionGate = new();
     private readonly object _iqGate = new();
     private readonly object _audioGate = new();
     private readonly object _statusGate = new();
-    private readonly PcmRingBuffer _audio = new(44100 * 6);
+    private readonly object _artworkGate = new();
+    private readonly object _bitrateGate = new();
+    private readonly PcmRingBuffer _audio = new((int)(Nrsc5Native.AudioSampleRate * 3));
+    private readonly PolyphaseResampler _resampler = new();
+    private readonly SurroundProcessor _surround = new();
     private readonly Nrsc5Native.EventCallback _callback;
     private readonly System.Threading.Timer _retuneTimer;
+    private readonly System.Threading.Timer _syncLossTimer;
+
+    // Artwork caches. LOT ids are only unique within a service port, so the cache is
+    // keyed by both; a bare lot id collides between subchannels of the same station.
+    private readonly Dictionary<(int Port, int Lot), CachedImage> _lotImages = new();
+    private readonly (int Port, int Lot)[] _xhdrByProgram = new (int, int)[8];
+    private readonly byte[]?[] _latestArtByProgram = new byte[8][];
+    private readonly byte[]?[] _stationLogoByProgram = new byte[8][];
+    private byte[]? _stationLogo;
+
     private IntPtr _session;
     private bool _disposed;
     private bool _enabled;
     private bool _replaceAnalogAudio = true;
+    private bool _bufferingEnabled = true;
+    private double _bufferSeconds = DefaultBufferSeconds;
     private int _selectedProgram;
+    private int _programMask;
     private double _inputSampleRate;
     private double _outputSampleRate;
     private double _tuningOffset;
-    private double _samplesUntilOutput;
     private double _ncoPhase;
-    private bool _havePreviousIq;
-    private float _previousI;
-    private float _previousQ;
+    private float[] _mixed = new float[65536];
     private float[] _iqOutput = new float[65536];
     private bool _haveAudioPair;
     private float _audioLeftA, _audioRightA, _audioLeftB, _audioRightB;
     private double _audioPhase;
+    private bool _hdAudioActive;
+    private bool _switchingProgram;
+    private long _switchDeadlineTicks;
+    private float _outputGain = 1f;
+    private long _lastDigitalTicks;
+    private long _lastSignalTicks;
+    private long _lastTunedFrequency;
+    private float _smoothedDbfs = -120;
+    private float _dbmCalibrationOffset = -30;
+    private long _bitrateBytes;
+    private long _bitrateStartedTicks = Stopwatch.GetTimestamp();
     private Nrsc5Status _status = Nrsc5Status.Idle;
+
+    private readonly record struct CachedImage(byte[] Bytes, uint Mime, int Program);
 
     public Nrsc5Engine()
     {
+        Array.Fill(_xhdrByProgram, (-1, -1));
         _callback = OnNativeEvent;
         _retuneTimer = new System.Threading.Timer(_ => { if (Enabled) Restart(); }, null, Timeout.Infinite, Timeout.Infinite);
+        _syncLossTimer = new System.Threading.Timer(_ => ConfirmSyncLoss(), null, Timeout.Infinite, Timeout.Infinite);
+        ApplyBufferCapacity();
+        // Seed the buffer target so a panel attaching later reads the real value
+        // instead of the zero in Nrsc5Status.Idle, which renders as "BUFFER OFF".
+        PublishBufferState();
     }
 
     public event Action<Nrsc5Status>? StatusChanged;
@@ -68,7 +134,7 @@ internal sealed class Nrsc5Engine : IDisposable
             if (_disposed || value == _enabled) return;
             Volatile.Write(ref _enabled, value);
             if (value) Start();
-            else Stop("Desactivado");
+            else Stop("Disabled");
         }
     }
 
@@ -78,14 +144,102 @@ internal sealed class Nrsc5Engine : IDisposable
         set => Volatile.Write(ref _replaceAnalogAudio, value);
     }
 
+    /// <summary>
+    /// Widens the decoded HD stereo image. It only ever touches the samples this plugin
+    /// writes, so the analog audio SDR# produces on its own is left alone.
+    /// </summary>
+    public bool SurroundEnabled
+    {
+        get => _surround.Enabled;
+        set => _surround.Enabled = value;
+    }
+
+    /// <summary>
+    /// When off, HD audio starts as soon as a single block is decoded. That minimises
+    /// latency but makes the analog/HD switch chatter on a marginal signal.
+    /// </summary>
+    public bool BufferingEnabled
+    {
+        get { lock (_audioGate) return _bufferingEnabled; }
+        set
+        {
+            lock (_audioGate)
+            {
+                if (_bufferingEnabled == value) return;
+                _bufferingEnabled = value;
+            }
+            ApplyBufferCapacity();
+            PublishBufferState();
+        }
+    }
+
+    /// <summary>Target HD prebuffer, in seconds, honoured only while buffering is enabled.</summary>
+    public double BufferSeconds
+    {
+        get { lock (_audioGate) return _bufferSeconds; }
+        set
+        {
+            value = Math.Clamp(value, MinBufferSeconds, MaxBufferSeconds);
+            lock (_audioGate)
+            {
+                if (Math.Abs(_bufferSeconds - value) < 0.001) return;
+                _bufferSeconds = value;
+                // A shorter target takes effect immediately; a longer one refills first.
+                _hdAudioActive = false;
+            }
+            ApplyBufferCapacity();
+            PublishBufferState();
+        }
+    }
+
+    public int ProgramMask => Volatile.Read(ref _programMask);
+
     public int SelectedProgram
     {
         get => Volatile.Read(ref _selectedProgram);
         set
         {
-            Volatile.Write(ref _selectedProgram, Math.Clamp(value, 0, 7));
+            value = Math.Clamp(value, 0, 7);
+            Volatile.Write(ref _selectedProgram, value);
             ResetAudio();
-            UpdateStatus(s => s with { Title = "", Artist = "", Message = s.Synced ? $"Sincronizado HD{value + 1}" : s.Message });
+            BeginProgramSwitch();
+            ResetBitrate();
+            UpdateStatus(s => s with
+            {
+                Title = "",
+                Artist = "",
+                Album = "",
+                BitrateKbps = 0,
+                SelectedProgram = value,
+                Message = s.Synced ? $"Synchronized HD{value + 1}" : s.Message
+            });
+            RefreshArtwork();
+        }
+    }
+
+    /// <summary>
+    /// Steps to the next subchannel the station actually broadcasts. Until a SIG table or
+    /// an audio service descriptor arrives nothing is known, so it falls back to plain
+    /// cycling rather than trapping the user on HD1.
+    /// </summary>
+    public void StepProgram(int direction)
+    {
+        if (direction == 0) return;
+        var mask = ProgramMask;
+        var current = SelectedProgram;
+
+        if (mask == 0)
+        {
+            SelectedProgram = (current + direction + 8) % 8;
+            return;
+        }
+
+        for (var hop = 1; hop <= 8; hop++)
+        {
+            var candidate = ((current + direction * hop) % 8 + 8) % 8;
+            if ((mask & (1 << candidate)) == 0) continue;
+            SelectedProgram = candidate;
+            return;
         }
     }
 
@@ -94,6 +248,8 @@ internal sealed class Nrsc5Engine : IDisposable
         get => Volatile.Read(ref _inputSampleRate);
         set
         {
+            var previous = Volatile.Read(ref _inputSampleRate);
+            if (Math.Abs(previous - value) < 0.5) return;
             Volatile.Write(ref _inputSampleRate, value);
             ResetIq();
         }
@@ -105,6 +261,17 @@ internal sealed class Nrsc5Engine : IDisposable
         set => Volatile.Write(ref _outputSampleRate, value);
     }
 
+    public float DbmCalibrationOffset
+    {
+        get => Volatile.Read(ref _dbmCalibrationOffset);
+        set
+        {
+            value = Math.Clamp(value, -100, 20);
+            Volatile.Write(ref _dbmCalibrationOffset, value);
+            UpdateStatus(s => s with { EstimatedDbm = s.SignalDbfs + value });
+        }
+    }
+
     public void SetTuningOffset(double value)
     {
         Volatile.Write(ref _tuningOffset, value);
@@ -113,15 +280,33 @@ internal sealed class Nrsc5Engine : IDisposable
 
     public void NotifyFrequencyChanged(long frequency)
     {
+        // Every new station starts on HD1. The subchannel line-up belongs to the station,
+        // not to the listener, so carrying an HD2 or HD3 choice over to a station that only
+        // broadcasts HD1 just leaves the decoder waiting for audio that never comes while
+        // the analog path plays. Fine tuning the same station keeps the current subchannel.
+        var previous = Interlocked.Exchange(ref _lastTunedFrequency, frequency);
+        if (previous == 0 || Math.Abs(frequency - previous) > StationStepHz)
+            Volatile.Write(ref _selectedProgram, 0);
+
+        CancelPendingSyncLoss();
         ResetAudio();
-        UpdateStatus(_ => Nrsc5Status.Idle with { Message = $"Sintonizando {frequency / 1_000_000.0:0.0} MHz..." });
+        ResetMetadata();
+        UpdateStatus(_ => Nrsc5Status.Idle with
+        {
+            Message = $"Tuning {frequency / 1_000_000.0:0.0} MHz...",
+            InputRate = InputSampleRate,
+            OffsetHz = _tuningOffset,
+            EstimatedDbm = -120 + DbmCalibrationOffset,
+            SelectedProgram = SelectedProgram,
+            BufferTargetSeconds = (float)EffectiveBufferSeconds()
+        });
         if (Enabled) _retuneTimer.Change(350, Timeout.Infinite);
     }
 
     public void Restart()
     {
         if (_disposed || !Enabled) return;
-        Stop("Reiniciando...");
+        Stop("Restarting...");
         if (Enabled) Start();
     }
 
@@ -132,24 +317,48 @@ internal sealed class Nrsc5Engine : IDisposable
         var inputRate = InputSampleRate;
         if (inputRate < Nrsc5Native.NativeFmSampleRate)
         {
-            UpdateStatus(s => s with { Synced = false, Message = $"IQ insuficiente: {inputRate / 1000:0} kS/s; minimo 744.2 kS/s" });
+            UpdateStatus(s => s with { Synced = false, Message = $"IQ sample rate too low: {inputRate / 1000:0} kS/s; minimum 744.2 kS/s" });
             return;
         }
 
         int produced;
         lock (_iqGate)
         {
-            var maxComplex = (int)Math.Ceiling(length * Nrsc5Native.NativeFmSampleRate / inputRate) + 4;
-            EnsureIqCapacity(maxComplex * 2);
-            produced = ResampleAndMix(buffer, length, inputRate, _iqOutput);
+            _resampler.Configure(inputRate, Nrsc5Native.NativeFmSampleRate);
+            EnsureCapacity(ref _mixed, length * 2);
+            MixToBaseband(buffer, length, inputRate);
+            produced = _resampler.Process(_mixed, length, ref _iqOutput);
         }
 
         if (produced == 0) return;
+        UpdateSignalMonitor(_iqOutput, produced);
         lock (_sessionGate)
         {
             if (_session == IntPtr.Zero) return;
             fixed (float* samples = _iqOutput)
                 Nrsc5Native.nrsc5_pipe_samples_cf32(_session, samples, (uint)(produced * 2));
+        }
+    }
+
+    /// <summary>
+    /// Shifts the selected VFO down to DC at the incoming sample rate. This has to happen
+    /// before decimation: the anti-alias filter is centred on DC, so mixing afterwards
+    /// would filter away the very carrier being tuned.
+    /// </summary>
+    private unsafe void MixToBaseband(Complex* input, int length, double inputRate)
+    {
+        var phaseStep = -2.0 * Math.PI * Volatile.Read(ref _tuningOffset) / inputRate;
+        for (var index = 0; index < length; index++)
+        {
+            var i = input[index].Real;
+            var q = input[index].Imag;
+            var cos = (float)Math.Cos(_ncoPhase);
+            var sin = (float)Math.Sin(_ncoPhase);
+            _mixed[index * 2] = i * cos - q * sin;
+            _mixed[index * 2 + 1] = i * sin + q * cos;
+            _ncoPhase += phaseStep;
+            if (_ncoPhase > Math.PI) _ncoPhase -= 2 * Math.PI;
+            else if (_ncoPhase < -Math.PI) _ncoPhase += 2 * Math.PI;
         }
     }
 
@@ -161,19 +370,47 @@ internal sealed class Nrsc5Engine : IDisposable
         if (outputRate <= 0) return;
         var frames = length / 2;
         var required = (int)Math.Ceiling(frames * Nrsc5Native.AudioSampleRate / outputRate) + 3;
-        if (_audio.AvailableFrames < required) return;
 
         lock (_audioGate)
         {
+            // _hdAudioActive is read and written from both the SDR# audio thread and the
+            // UI thread, so the whole arm/disarm decision stays inside the gate.
+            var available = _audio.AvailableFrames;
+            if (!_hdAudioActive)
+            {
+                var startup = _bufferingEnabled
+                    ? (int)(Nrsc5Native.AudioSampleRate * _bufferSeconds)
+                    : 0;
+                if (available < Math.Max(required, startup))
+                {
+                    HoldOverAnalog(buffer, frames, outputRate);
+                    return;
+                }
+                _hdAudioActive = true;
+                _switchingProgram = false;
+            }
+            else if (available < required)
+            {
+                // Keep the HD path armed. A short producer jitter gap should use
+                // this untouched analog block, not force a full startup rebuffer.
+                return;
+            }
+
             if (!_haveAudioPair)
             {
                 if (!_audio.TryReadFrame(out _audioLeftA, out _audioRightA) ||
-                    !_audio.TryReadFrame(out _audioLeftB, out _audioRightB)) return;
+                    !_audio.TryReadFrame(out _audioLeftB, out _audioRightB))
+                {
+                    _hdAudioActive = false;
+                    return;
+                }
                 _haveAudioPair = true;
                 _audioPhase = 0;
             }
 
             var advance = Nrsc5Native.AudioSampleRate / outputRate;
+            var gainStep = (float)(1.0 / (FadeSeconds * outputRate));
+            _surround.Configure(outputRate);
             for (var frame = 0; frame < frames; frame++)
             {
                 while (_audioPhase >= 1.0)
@@ -183,14 +420,26 @@ internal sealed class Nrsc5Engine : IDisposable
                     if (!_audio.TryReadFrame(out _audioLeftB, out _audioRightB))
                     {
                         _haveAudioPair = false;
+                        _hdAudioActive = false;
                         return;
                     }
                     _audioPhase -= 1.0;
                 }
 
                 var t = (float)_audioPhase;
-                buffer[frame * 2] = _audioLeftA + (_audioLeftB - _audioLeftA) * t;
-                buffer[frame * 2 + 1] = _audioRightA + (_audioRightB - _audioRightA) * t;
+                var left = _audioLeftA + (_audioLeftB - _audioLeftA) * t;
+                var right = _audioRightA + (_audioRightB - _audioRightA) * t;
+                _surround.Process(ref left, ref right);
+                if (_outputGain < 1f)
+                {
+                    // Ramps the new subchannel in, so the switch is not a step edge.
+                    _outputGain = Math.Min(1f, _outputGain + gainStep);
+                    left *= _outputGain;
+                    right *= _outputGain;
+                }
+
+                buffer[frame * 2] = left;
+                buffer[frame * 2 + 1] = right;
                 _audioPhase += advance;
             }
         }
@@ -201,8 +450,9 @@ internal sealed class Nrsc5Engine : IDisposable
         if (_disposed) return;
         _disposed = true;
         Volatile.Write(ref _enabled, false);
+        Stop("Closed");
         _retuneTimer.Dispose();
-        Stop("Cerrado");
+        _syncLossTimer.Dispose();
     }
 
     private void Start()
@@ -213,23 +463,32 @@ internal sealed class Nrsc5Engine : IDisposable
             try
             {
                 if (!Environment.Is64BitProcess)
-                    throw new PlatformNotSupportedException("Este paquete requiere SDR# x64; el proceso actual es x86.");
+                    throw new PlatformNotSupportedException("This package requires SDR# x64; the current process is x86.");
 
                 if (Nrsc5Native.nrsc5_open_pipe(out var state) != 0 || state == IntPtr.Zero)
-                    throw new InvalidOperationException("nrsc5_open_pipe fallo.");
+                    throw new InvalidOperationException("nrsc5_open_pipe failed.");
 
                 Nrsc5Native.nrsc5_set_callback(state, _callback, IntPtr.Zero);
                 if (Nrsc5Native.nrsc5_set_mode(state, 0) != 0)
                 {
                     Nrsc5Native.nrsc5_close(state);
-                    throw new InvalidOperationException("No se pudo seleccionar NRSC-5 FM.");
+                    throw new InvalidOperationException("Could not select NRSC-5 FM mode.");
                 }
 
                 Nrsc5Native.nrsc5_start(state);
                 _session = state;
                 ResetIq();
                 ResetAudio();
-                UpdateStatus(_ => Nrsc5Status.Idle with { Message = "Buscando señal NRSC-5..." });
+                ResetMetadata();
+                UpdateStatus(_ => Nrsc5Status.Idle with
+                {
+                    Message = "Searching for NRSC-5 signal...",
+                    InputRate = InputSampleRate,
+                    OffsetHz = _tuningOffset,
+                    EstimatedDbm = -120 + DbmCalibrationOffset,
+                    SelectedProgram = SelectedProgram,
+                    BufferTargetSeconds = (float)EffectiveBufferSeconds()
+                });
             }
             catch (Exception ex)
             {
@@ -241,6 +500,7 @@ internal sealed class Nrsc5Engine : IDisposable
 
     private void Stop(string message)
     {
+        CancelPendingSyncLoss();
         lock (_sessionGate)
         {
             if (_session != IntPtr.Zero)
@@ -253,49 +513,51 @@ internal sealed class Nrsc5Engine : IDisposable
         }
         ResetIq();
         ResetAudio();
-        UpdateStatus(_ => Nrsc5Status.Idle with { Message = message });
+        ResetMetadata();
+        UpdateStatus(_ => Nrsc5Status.Idle with
+        {
+            Message = message,
+            EstimatedDbm = -120 + DbmCalibrationOffset,
+            SelectedProgram = SelectedProgram,
+            BufferTargetSeconds = (float)EffectiveBufferSeconds()
+        });
     }
 
-    private unsafe int ResampleAndMix(Complex* input, int length, double inputRate, float[] output)
+    private void UpdateSignalMonitor(float[] samples, int complexCount)
     {
-        var step = inputRate / Nrsc5Native.NativeFmSampleRate;
-        var phaseStep = -2.0 * Math.PI * Volatile.Read(ref _tuningOffset) / Nrsc5Native.NativeFmSampleRate;
-        var outIndex = 0;
+        var now = Stopwatch.GetTimestamp();
+        var previous = Volatile.Read(ref _lastSignalTicks);
+        if (previous != 0 && (now - previous) / (double)Stopwatch.Frequency < 0.09) return;
+        Volatile.Write(ref _lastSignalTicks, now);
 
-        for (var index = 0; index < length; index++)
+        var sampleCount = Math.Min(SignalProbeSamples, complexCount);
+        if (sampleCount <= 0) return;
+        double power = 0;
+        double peak = 0;
+        for (var i = 0; i < sampleCount; i++)
         {
-            var currentI = input[index].Real;
-            var currentQ = input[index].Imag;
-            if (!_havePreviousIq)
-            {
-                _previousI = currentI;
-                _previousQ = currentQ;
-                _havePreviousIq = true;
-                continue;
-            }
-
-            while (_samplesUntilOutput <= 1.0)
-            {
-                var t = (float)_samplesUntilOutput;
-                var i = _previousI + (currentI - _previousI) * t;
-                var q = _previousQ + (currentQ - _previousQ) * t;
-                var cos = (float)Math.Cos(_ncoPhase);
-                var sin = (float)Math.Sin(_ncoPhase);
-                output[outIndex * 2] = i * cos - q * sin;
-                output[outIndex * 2 + 1] = i * sin + q * cos;
-                outIndex++;
-                _ncoPhase += phaseStep;
-                if (_ncoPhase > Math.PI) _ncoPhase -= 2 * Math.PI;
-                else if (_ncoPhase < -Math.PI) _ncoPhase += 2 * Math.PI;
-                _samplesUntilOutput += step;
-            }
-
-            _samplesUntilOutput -= 1.0;
-            _previousI = currentI;
-            _previousQ = currentQ;
+            var source = Math.Min(complexCount - 1, (int)((long)i * complexCount / sampleCount));
+            var re = samples[source * 2];
+            var im = samples[source * 2 + 1];
+            var magnitude = re * re + im * im;
+            power += magnitude;
+            if (magnitude > peak) peak = magnitude;
         }
 
-        return outIndex;
+        power /= sampleCount;
+        var currentDbfs = (float)(10 * Math.Log10(Math.Max(power, 1e-12)));
+        _smoothedDbfs = _smoothedDbfs <= -119 ? currentDbfs : _smoothedDbfs * 0.78f + currentDbfs * 0.22f;
+        var peakDbfs = (float)(10 * Math.Log10(Math.Max(peak, 1e-12)));
+        var calibration = DbmCalibrationOffset;
+        var buffered = (float)(_audio.AvailableFrames / Nrsc5Native.AudioSampleRate);
+        UpdateStatus(s => s with
+        {
+            InputRate = InputSampleRate,
+            SignalDbfs = _smoothedDbfs,
+            PeakDbfs = peakDbfs,
+            EstimatedDbm = _smoothedDbfs + calibration,
+            BufferedSeconds = buffered
+        });
     }
 
     private void OnNativeEvent(IntPtr evt, IntPtr opaque)
@@ -303,25 +565,28 @@ internal sealed class Nrsc5Engine : IDisposable
         try
         {
             var type = (Nrsc5Event)Marshal.ReadInt32(evt);
-            var union = IntPtr.Add(evt, IntPtr.Size == 8 ? 8 : 4);
+            var union = IntPtr.Add(evt, Nrsc5Layout.Union);
             switch (type)
             {
                 case Nrsc5Event.Sync:
-                    UpdateStatus(s => s with { Synced = true, Message = $"Sincronizado HD{SelectedProgram + 1}" });
+                    Volatile.Write(ref _lastDigitalTicks, Stopwatch.GetTimestamp());
+                    _syncLossTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                    UpdateStatus(s => s with { Synced = true, Message = $"Synchronized HD{SelectedProgram + 1}" });
                     break;
                 case Nrsc5Event.LostSync:
-                    ResetAudio();
-                    UpdateStatus(s => s with { Synced = false, Message = "Se perdio la señal HD; audio analogico activo" });
+                    _syncLossTimer.Change(SyncLossGraceMs(), Timeout.Infinite);
+                    UpdateStatus(s => s with { Message = "HD signal unstable; holding buffered audio..." });
                     break;
                 case Nrsc5Event.Mer:
-                    UpdateStatus(s => s with
-                    {
-                        MerLower = ReadFloat(union, 0),
-                        MerUpper = ReadFloat(union, 4)
-                    });
+                    var lower = ReadFloat(union, Nrsc5Layout.MerLower);
+                    var upper = ReadFloat(union, Nrsc5Layout.MerUpper);
+                    UpdateStatus(s => s with { MerLower = lower, MerUpper = upper, SnrDb = (lower + upper) / 2 });
                     break;
                 case Nrsc5Event.Ber:
-                    UpdateStatus(s => s with { Ber = ReadFloat(union, 0) });
+                    UpdateStatus(s => s with { Ber = ReadFloat(union, Nrsc5Layout.BerCber) });
+                    break;
+                case Nrsc5Event.Hdc:
+                    ReceiveHdc(union);
                     break;
                 case Nrsc5Event.Audio:
                     ReceiveAudio(union);
@@ -329,41 +594,229 @@ internal sealed class Nrsc5Engine : IDisposable
                 case Nrsc5Event.Id3:
                     ReceiveId3(union);
                     break;
+                case Nrsc5Event.Lot:
+                    ReceiveLot(union);
+                    break;
+                case Nrsc5Event.Sig:
+                    ReceiveSig(union);
+                    break;
+                case Nrsc5Event.AudioService:
+                    MarkProgramAvailable(Marshal.ReadInt32(union, Nrsc5Layout.AudioServiceProgram));
+                    break;
                 case Nrsc5Event.StationName:
-                    var station = ReadUtf8(Marshal.ReadIntPtr(union));
+                    var station = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationNameName));
                     if (!string.IsNullOrWhiteSpace(station)) UpdateStatus(s => s with { Station = station });
                     break;
             }
         }
         catch
         {
-            // Nunca permita que una excepcion administrada cruce el callback nativo.
+            // Never let a managed exception cross back into the native callback.
+        }
+    }
+
+    private void ReceiveHdc(IntPtr union)
+    {
+        var program = Marshal.ReadInt32(union, Nrsc5Layout.HdcProgram);
+        MarkProgramAvailable(program);
+        if (program != SelectedProgram) return;
+        var count = ReadNativeSize(union, Nrsc5Layout.HdcCount);
+        if (count <= 0 || count > 1_048_576) return;
+
+        lock (_bitrateGate)
+        {
+            _bitrateBytes += count;
+            var now = Stopwatch.GetTimestamp();
+            var elapsed = (now - _bitrateStartedTicks) / (double)Stopwatch.Frequency;
+            if (elapsed < 1.0) return;
+            var bitrate = (float)(_bitrateBytes * 8.0 / elapsed / 1000.0);
+            _bitrateBytes = 0;
+            _bitrateStartedTicks = now;
+            UpdateStatus(s => s with { BitrateKbps = bitrate });
         }
     }
 
     private void ReceiveAudio(IntPtr union)
     {
-        var pointerOffset = IntPtr.Size == 8 ? 8 : 4;
-        var program = Marshal.ReadInt32(union);
+        var program = Marshal.ReadInt32(union, Nrsc5Layout.AudioProgram);
+        MarkProgramAvailable(program);
         if (program != SelectedProgram) return;
-        var data = Marshal.ReadIntPtr(union, pointerOffset);
-        var countOffset = pointerOffset + IntPtr.Size;
-        var count64 = IntPtr.Size == 8 ? Marshal.ReadInt64(union, countOffset) : Marshal.ReadInt32(union, countOffset);
-        if (data == IntPtr.Zero || count64 <= 0 || count64 > 65536) return;
-        var pcm = new short[(int)count64];
+        var data = Marshal.ReadIntPtr(union, Nrsc5Layout.AudioData);
+        var count = ReadNativeSize(union, Nrsc5Layout.AudioCount);
+        if (data == IntPtr.Zero || count <= 0 || count > 65536) return;
+        var pcm = new short[(int)count];
         Marshal.Copy(data, pcm, 0, pcm.Length);
+        Volatile.Write(ref _lastDigitalTicks, Stopwatch.GetTimestamp());
         _audio.Write(pcm);
     }
 
     private void ReceiveId3(IntPtr union)
     {
-        var program = Marshal.ReadInt32(union);
-        if (program != SelectedProgram) return;
-        var pointerOffset = IntPtr.Size == 8 ? 8 : 4;
-        var title = ReadUtf8(Marshal.ReadIntPtr(union, pointerOffset));
-        var artist = ReadUtf8(Marshal.ReadIntPtr(union, pointerOffset + IntPtr.Size));
-        UpdateStatus(s => s with { Title = title, Artist = artist });
+        var program = Marshal.ReadInt32(union, Nrsc5Layout.Id3Program);
+        if (program is < 0 or > 7) return;
+        MarkProgramAvailable(program);
+
+        var title = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.Id3Title));
+        var artist = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.Id3Artist));
+        var album = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.Id3Album));
+        var mime = unchecked((uint)Marshal.ReadInt32(union, Nrsc5Layout.Id3XhdrMime));
+        var lot = Marshal.ReadInt32(union, Nrsc5Layout.Id3XhdrLot);
+
+        lock (_artworkGate)
+        {
+            // The XHDR carries no port, so match the lot id against any port already
+            // cached for this program before falling back to a port-agnostic entry.
+            _xhdrByProgram[program] = lot >= 0 && Nrsc5Mime.IsImage(mime) ? (-1, lot) : (-1, -1);
+        }
+
+        if (program == SelectedProgram)
+            UpdateStatus(s => s with { Title = title, Artist = artist, Album = album });
+        RefreshArtwork();
     }
+
+    private void ReceiveLot(IntPtr union)
+    {
+        var port = Marshal.ReadInt16(union, Nrsc5Layout.LotPort) & 0xFFFF;
+        var lot = Marshal.ReadInt32(union, Nrsc5Layout.LotId);
+        var size = Marshal.ReadInt32(union, Nrsc5Layout.LotSize);
+        var mime = unchecked((uint)Marshal.ReadInt32(union, Nrsc5Layout.LotMime));
+        var data = Marshal.ReadIntPtr(union, Nrsc5Layout.LotData);
+        if (lot < 0 || size <= 0 || size > MaxArtworkBytes || data == IntPtr.Zero) return;
+
+        if (!Nrsc5Mime.IsImage(mime))
+        {
+            var signature = new byte[Math.Min(size, 8)];
+            Marshal.Copy(data, signature, 0, signature.Length);
+            if (!LooksLikeImage(signature)) return;
+        }
+
+        var bytes = new byte[size];
+        Marshal.Copy(data, bytes, 0, size);
+        var program = ProgramFromService(Marshal.ReadIntPtr(union, Nrsc5Layout.LotService));
+
+        lock (_artworkGate)
+        {
+            if (_lotImages.Count >= MaxCachedImages && !_lotImages.ContainsKey((port, lot)))
+                _lotImages.Remove(_lotImages.Keys.First());
+            _lotImages[(port, lot)] = new CachedImage(bytes, mime, program);
+
+            if (mime == Nrsc5Mime.StationLogo)
+            {
+                // A station logo is never referenced by an ID3 XHDR. Keeping it only in
+                // the lot cache is why it used to arrive and never appear on screen.
+                if (program >= 0) _stationLogoByProgram[program] = bytes;
+                else _stationLogo = bytes;
+            }
+            else if (program >= 0)
+            {
+                _latestArtByProgram[program] = bytes;
+            }
+            else
+            {
+                // No SIG binding yet: assume it belongs to the program being listened to.
+                _latestArtByProgram[SelectedProgram] = bytes;
+            }
+        }
+
+        RefreshArtwork();
+    }
+
+    /// <summary>
+    /// Walks the SIG linked list to learn which subchannels exist. Pointers are only
+    /// valid for the duration of the callback, so everything needed is copied here.
+    /// </summary>
+    private void ReceiveSig(IntPtr union)
+    {
+        var service = Marshal.ReadIntPtr(union, Nrsc5Layout.SigServices);
+        var guard = 0;
+        while (service != IntPtr.Zero && guard++ < 64)
+        {
+            var type = Marshal.ReadByte(service, Nrsc5Layout.SigServiceType);
+            var number = Marshal.ReadInt16(service, Nrsc5Layout.SigServiceNumber) & 0xFFFF;
+            var audioComponent = Marshal.ReadIntPtr(service, Nrsc5Layout.SigServiceAudioComponent);
+            if (type == Nrsc5SigServiceType.Audio && audioComponent != IntPtr.Zero)
+                MarkProgramAvailable(number - 1);
+            service = Marshal.ReadIntPtr(service, Nrsc5Layout.SigServiceNext);
+        }
+    }
+
+    /// <summary>Maps a SIG service back to a 0-based program index, or -1 when unknown.</summary>
+    private static int ProgramFromService(IntPtr service)
+    {
+        if (service == IntPtr.Zero) return -1;
+        try
+        {
+            var type = Marshal.ReadByte(service, Nrsc5Layout.SigServiceType);
+            if (type != Nrsc5SigServiceType.Audio) return -1;
+            var number = Marshal.ReadInt16(service, Nrsc5Layout.SigServiceNumber) & 0xFFFF;
+            var program = number - 1;
+            return program is >= 0 and <= 7 ? program : -1;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private void MarkProgramAvailable(int program)
+    {
+        if (program is < 0 or > 7) return;
+        var bit = 1 << program;
+        int current, updated;
+        do
+        {
+            current = Volatile.Read(ref _programMask);
+            if ((current & bit) != 0) return;
+            updated = current | bit;
+        }
+        while (Interlocked.CompareExchange(ref _programMask, updated, current) != current);
+
+        UpdateStatus(s => s with { ProgramMask = updated });
+    }
+
+    /// <summary>
+    /// Resolves what to show for the selected program, most specific first: the image the
+    /// current ID3 XHDR points at, then the most recent album art seen on this program,
+    /// then the station logo. Stations that broadcast art without a matching XHDR, and
+    /// station logos that are never referenced at all, both used to fall through to
+    /// nothing at all.
+    /// </summary>
+    private void RefreshArtwork()
+    {
+        var program = SelectedProgram;
+        byte[]? chosen;
+        var isLogo = false;
+
+        lock (_artworkGate)
+        {
+            chosen = null;
+            var (_, lot) = _xhdrByProgram[program];
+            if (lot >= 0)
+            {
+                foreach (var entry in _lotImages)
+                {
+                    if (entry.Key.Lot != lot) continue;
+                    if (entry.Value.Program >= 0 && entry.Value.Program != program) continue;
+                    chosen = entry.Value.Bytes;
+                    break;
+                }
+            }
+
+            chosen ??= _latestArtByProgram[program];
+            if (chosen is null)
+            {
+                chosen = _stationLogoByProgram[program] ?? _stationLogo;
+                isLogo = chosen is not null;
+            }
+        }
+
+        var logo = isLogo;
+        UpdateStatus(s => s with { Artwork = chosen, ArtworkIsStationLogo = logo });
+    }
+
+    private static bool LooksLikeImage(byte[] data) =>
+        data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF ||
+        data.Length >= 8 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47;
 
     private void UpdateStatus(Func<Nrsc5Status, Nrsc5Status> update)
     {
@@ -377,13 +830,115 @@ internal sealed class Nrsc5Engine : IDisposable
         StatusChanged?.Invoke(next);
     }
 
+    private double EffectiveBufferSeconds()
+    {
+        lock (_audioGate) return _bufferingEnabled ? _bufferSeconds : 0;
+    }
+
+    /// <summary>Grace before HD audio is abandoned: never shorter than the buffer itself.</summary>
+    private int SyncLossGraceMs()
+    {
+        var bufferMs = (int)(EffectiveBufferSeconds() * 1000);
+        return Math.Max(MinSyncLossGraceMs, bufferMs + 500);
+    }
+
+    private void ApplyBufferCapacity()
+    {
+        double seconds;
+        lock (_audioGate) seconds = _bufferingEnabled ? _bufferSeconds : MinBufferSeconds;
+        // Twice the target plus a second of slack keeps room for producer bursts.
+        _audio.EnsureCapacityFrames((int)(Nrsc5Native.AudioSampleRate * (seconds * 2 + 1)));
+    }
+
+    private void PublishBufferState()
+    {
+        var target = (float)EffectiveBufferSeconds();
+        UpdateStatus(s => s with { BufferTargetSeconds = target });
+    }
+
     private void ResetIq()
     {
         lock (_iqGate)
         {
-            _samplesUntilOutput = 0;
+            _resampler.Reset();
             _ncoPhase = 0;
-            _havePreviousIq = false;
+            _smoothedDbfs = -120;
+            _lastSignalTicks = 0;
+        }
+    }
+
+    private void ConfirmSyncLoss()
+    {
+        if (_disposed) return;
+        var graceMs = SyncLossGraceMs();
+        var lastDigital = Volatile.Read(ref _lastDigitalTicks);
+        if (lastDigital != 0)
+        {
+            var elapsedMs = (Stopwatch.GetTimestamp() - lastDigital) * 1000.0 / Stopwatch.Frequency;
+            if (elapsedMs < graceMs)
+            {
+                var remainingMs = Math.Max(50, (int)Math.Ceiling(graceMs - elapsedMs));
+                _syncLossTimer.Change(remainingMs, Timeout.Infinite);
+                return;
+            }
+        }
+
+        Volatile.Write(ref _lastDigitalTicks, 0);
+        ResetAudio();
+        UpdateStatus(s => s with
+        {
+            Synced = false,
+            Message = "HD signal lost; analog audio active",
+            BitrateKbps = 0,
+            BufferedSeconds = 0
+        });
+    }
+
+    private void CancelPendingSyncLoss()
+    {
+        _syncLossTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        Volatile.Write(ref _lastDigitalTicks, 0);
+    }
+
+    /// <summary>
+    /// Keeps the analog path out of a subchannel change: SDR# has already written its own
+    /// audio into this block, so without it the switch bursts a fragment of the analog
+    /// programme between the two HD subchannels. The level is ramped down rather than cut,
+    /// and the hold expires so a subchannel that never delivers audio does not leave the
+    /// listener in silence.
+    /// </summary>
+    private unsafe void HoldOverAnalog(float* buffer, int frames, double outputRate)
+    {
+        if (!_switchingProgram) return;
+        if (Stopwatch.GetTimestamp() > _switchDeadlineTicks)
+        {
+            _switchingProgram = false;
+            _outputGain = 1f;
+            return;
+        }
+
+        var step = (float)(1.0 / (FadeSeconds * outputRate));
+        for (var frame = 0; frame < frames; frame++)
+        {
+            _outputGain = Math.Max(0f, _outputGain - step);
+            buffer[frame * 2] *= _outputGain;
+            buffer[frame * 2 + 1] *= _outputGain;
+        }
+    }
+
+    /// <summary>Arms the analog hold for a subchannel change, but never for a station change.</summary>
+    private void BeginProgramSwitch()
+    {
+        // Both reads take other locks, and an UpdateStatus lambda can take the audio gate,
+        // so neither may happen while this thread holds it.
+        var covering = Enabled && ReplaceAnalogAudio && Status.Synced;
+        var holdSeconds = Math.Max(MinSwitchHoldSeconds, EffectiveBufferSeconds() + 2.0);
+
+        lock (_audioGate)
+        {
+            _switchingProgram = covering;
+            _switchDeadlineTicks = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * holdSeconds);
+            if (!covering) _outputGain = 1f;
         }
     }
 
@@ -394,13 +949,45 @@ internal sealed class Nrsc5Engine : IDisposable
             _audio.Clear();
             _haveAudioPair = false;
             _audioPhase = 0;
+            _hdAudioActive = false;
+            // A station change or a stop cancels any pending subchannel hold.
+            _switchingProgram = false;
+            _outputGain = 1f;
+            // Otherwise the delay line replays a fragment of the previous station.
+            _surround.Reset();
         }
     }
 
-    private void EnsureIqCapacity(int length)
+    private void ResetMetadata()
     {
-        if (_iqOutput.Length < length) Array.Resize(ref _iqOutput, Math.Max(length, _iqOutput.Length * 2));
+        lock (_artworkGate)
+        {
+            _lotImages.Clear();
+            Array.Fill(_xhdrByProgram, (-1, -1));
+            Array.Clear(_latestArtByProgram);
+            Array.Clear(_stationLogoByProgram);
+            _stationLogo = null;
+        }
+        Volatile.Write(ref _programMask, 0);
+        ResetBitrate();
     }
+
+    private void ResetBitrate()
+    {
+        lock (_bitrateGate)
+        {
+            _bitrateBytes = 0;
+            _bitrateStartedTicks = Stopwatch.GetTimestamp();
+        }
+    }
+
+    private static void EnsureCapacity(ref float[] buffer, int length)
+    {
+        if (buffer.Length < length) Array.Resize(ref buffer, Math.Max(length, buffer.Length * 2));
+    }
+
+    private static long ReadNativeSize(IntPtr pointer, int offset) =>
+        IntPtr.Size == 8 ? Marshal.ReadInt64(pointer, offset) : Marshal.ReadInt32(pointer, offset);
 
     private static float ReadFloat(IntPtr pointer, int offset) =>
         BitConverter.Int32BitsToSingle(Marshal.ReadInt32(pointer, offset));

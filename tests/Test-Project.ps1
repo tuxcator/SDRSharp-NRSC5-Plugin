@@ -12,6 +12,7 @@ $required = @(
     'src\SDRSharp.NRSC5\Nrsc5Engine.cs',
     'src\SDRSharp.NRSC5\Nrsc5Native.cs',
     'src\SDRSharp.NRSC5\Nrsc5Panel.cs',
+    'src\SDRSharp.NRSC5\PolyphaseResampler.cs',
     'scripts\Get-Dependencies.ps1',
     'scripts\Build.ps1',
     'scripts\Install.ps1'
@@ -21,8 +22,56 @@ foreach ($relative in $required) {
 }
 
 $source = (Get-ChildItem -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5') -Filter '*.cs' -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join [Environment]::NewLine
-foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5_pipe_samples_cf32','ProcessAudio','SelectedProgram') {
+foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5_pipe_samples_cf32','ProcessAudio','SelectedProgram','Nrsc5Event.Lot','ReceiveLot','BitrateKbps','SignalProbeSamples','SyncLossGraceMs','ConfirmSyncLoss','_lastDigitalTicks','remainingMs','_lastFrequency','LayoutArtworkSquare','DecodeArtwork','DbmCalibrationOffset','BuildChannelSelector','PREVIOUS','NEXT  ▶','Synchronized HD','AutoScroll = false','RowStyle(SizeType.Percent','Dock = DockStyle.Fill',
+    'PolyphaseResampler','MixToBaseband','BufferSeconds','BufferingEnabled','EnsureCapacityFrames',
+    'Nrsc5Layout','Nrsc5Mime.StationLogo','RefreshArtwork','_stationLogoByProgram','_latestArtByProgram',
+    'ReceiveSig','MarkProgramAvailable','StepProgram','ProgramMask','PanelFonts') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
+}
+
+if ($source -match 'AutoScroll\s*=\s*true' -or $source -match 'MinimumSize\s*=\s*new Size\(370, 700\)') {
+    throw 'El panel no debe forzar scroll ni un tamaño rígido.'
+}
+
+# El underflow breve debe conservar armada la ruta HD.
+if ($source -match 'else\s+if\s*\(available\s*<\s*required\)\s*\{\s*_hdAudioActive\s*=\s*false') {
+    throw 'Un underflow breve no debe obligar a llenar otra vez todo el prebuffer HD.'
+}
+# Recentrar el espectro solo mueve el mezclador digital.
+if ($source -match 'PropertyName\s+is\s+nameof\(ISharpControl\.Frequency\)\s+or\s+nameof\(ISharpControl\.CenterFrequency\)') {
+    throw 'El recentrado del espectro no debe reiniciar el decodificador NRSC-5.'
+}
+if ($source -match 'ComputeSpectrum|SpectrumDisplay|NRSC-5 SPECTRUM') {
+    throw 'El analizador FFT fue retirado para priorizar las metricas tecnicas y el Artwork.'
+}
+if ($source -match 'ComboBox\s+_program') {
+    throw 'El selector desplegable de subcanales no debe regresar; use Previous/Next.'
+}
+
+# Los offsets del struct de eventos se derivan en Nrsc5Layout, no a mano en cada lectura.
+if ($source -match 'IntPtr\.Size\s*==\s*8\s*\?\s*8\s*:\s*4') {
+    throw 'Los offsets del evento nativo deben salir de Nrsc5Layout, no escribirse a mano.'
+}
+
+# El remuestreo debe filtrar antes de decimar.
+if ($source -notmatch 'BuildBank' -or $source -notmatch 'KaiserBeta') {
+    throw 'El remuestreador debe conservar el filtro anti-alias Kaiser.'
+}
+
+# _hdAudioActive se toca desde el hilo de audio y el de UI: siempre bajo _audioGate.
+$processAudio = [regex]::Match($source, 'public unsafe void ProcessAudio[\s\S]*?\r?\n    \}').Value
+if (-not $processAudio) { throw 'No se pudo aislar ProcessAudio para revisarlo.' }
+if ($processAudio -match '_hdAudioActive[\s\S]*lock \(_audioGate\)') {
+    throw '_hdAudioActive no debe leerse ni escribirse fuera de _audioGate.'
+}
+if ($processAudio -notmatch 'lock \(_audioGate\)[\s\S]*_hdAudioActive') {
+    throw '_hdAudioActive debe manipularse dentro de _audioGate.'
+}
+
+# Las fuentes viven en PanelFonts; crearlas en cada control filtraba un handle GDI.
+$panel = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\Nrsc5Panel.cs')
+if ($panel -match 'Font\s*=\s*new Font\(') {
+    throw 'Las fuentes deben reutilizarse desde PanelFonts en lugar de crearse por control.'
 }
 
 if ($Distribution) {
