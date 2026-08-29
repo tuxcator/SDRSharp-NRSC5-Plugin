@@ -7,6 +7,24 @@ the analog audio.
 
 *[Versión en español](README.es.md)*
 
+## See it running
+
+![Stepping through HD1, HD2 and HD3 on 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
+
+Stepping through the three subchannels of one station on 103.7 MHz: the artwork, the metadata and
+the whole signal analysis follow the selected subchannel, and the audio never drops back to analog
+in between. [Watch the full 50-second capture with audio](docs/media/demo-hd1-hd2-hd3.mp4).
+
+### Screenshots
+
+The same station on each of its three subchannels. Click any image for the full resolution.
+
+| HD1 · La Ke Buena | HD2 · LA AW | HD3 · Milenio Radio |
+|---|---|---|
+| [![HD1](docs/media/screenshot-hd1.png)](docs/media/screenshot-hd1.png) | [![HD2](docs/media/screenshot-hd2.png)](docs/media/screenshot-hd2.png) | [![HD3](docs/media/screenshot-hd3.png)](docs/media/screenshot-hd3.png) |
+
+Captured with an Airspy HF+ Discovery at 912 ksps. The `Device SN` field is masked on purpose.
+
 ## Documentation
 
 - [Full installation guide](docs/INSTALLATION.md)
