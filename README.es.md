@@ -7,6 +7,8 @@ digitales en paralelo al audio analógico.
 
 *[English version](README.md)*
 
+[![Donar con PayPal](https://img.shields.io/badge/PayPal-donar-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
 ## En funcionamiento
 
 ![Recorrido por HD1, HD2 y HD3 en 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
@@ -156,3 +158,13 @@ restablecer o reinstalar Windows.
 
 El código del plugin se distribuye bajo GPL-3.0-or-later para ser compatible con nrsc5. Los
 ensamblados del SDK de SDR# se descargan desde Airspy y no deben publicarse dentro del repositorio.
+
+## Apoyo
+
+Este plugin es software libre y se desarrolla en tiempo libre. Si le resulta útil, una donación es
+una forma de agradecerlo: es totalmente opcional y no otorga privilegios, soporte prioritario ni
+influencia sobre el desarrollo.
+
+[![Donar con PayPal](https://img.shields.io/badge/PayPal-donar-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
+<https://paypal.me/EmmanuelM183>

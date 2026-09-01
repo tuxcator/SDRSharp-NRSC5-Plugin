@@ -7,6 +7,8 @@ the analog audio.
 
 *[Versión en español](README.es.md)*
 
+[![Donate with PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
 ## See it running
 
 ![Stepping through HD1, HD2 and HD3 on 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
@@ -151,3 +153,13 @@ states it cannot be turned back on without resetting or reinstalling Windows.
 
 The plugin code is distributed under GPL-3.0-or-later for compatibility with nrsc5. The SDR# SDK
 assemblies are downloaded from Airspy and must not be republished inside this repository.
+
+## Support
+
+This plugin is free software and is developed in my spare time. If it is useful to you, a donation
+is a welcome way to say thanks — it is entirely optional and grants no privileges, priority support,
+or influence over the roadmap.
+
+[![Donate with PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
+<https://paypal.me/EmmanuelM183>
