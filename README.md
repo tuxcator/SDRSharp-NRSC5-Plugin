@@ -7,7 +7,12 @@ the analog audio.
 
 *[Versión en español](README.es.md)*
 
-[![Donate with PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+<p align="center">
+  <a href="https://paypal.me/EmmanuelM183">
+    <img src="https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white"
+         height="60" alt="Donate with PayPal">
+  </a>
+</p>
 
 ## See it running
 

@@ -7,7 +7,12 @@ digitales en paralelo al audio analógico.
 
 *[English version](README.md)*
 
-[![Donar con PayPal](https://img.shields.io/badge/PayPal-donar-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+<p align="center">
+  <a href="https://paypal.me/EmmanuelM183">
+    <img src="https://img.shields.io/badge/Donar-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white"
+         height="60" alt="Donar con PayPal">
+  </a>
+</p>
 
 ## En funcionamiento
 
