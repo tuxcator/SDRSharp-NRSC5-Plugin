@@ -2,6 +2,24 @@
 
 *[English version](CHANGELOG.md)*
 
+## Sin publicar — compilación de desarrollo 3.3.1
+
+- **LOCATION ahora nombra la población donde está el transmisor**, en vez de un par de
+  coordenadas. Las coordenadas que llegan por SIS se geocodifican con el servicio del US
+  Census, que es de dominio público y no pide clave, con Nominatim de OpenStreetMap como
+  respaldo y para fuera de Estados Unidos. Se respeta la política de Nominatim: User-Agent
+  identificable, como mucho una petición por segundo, y resultados en caché 180 días.
+- La población del transmisor **no** suele coincidir con la ciudad de licencia, así que
+  ahora se muestran las dos: la del transmisor en la celda y la de licencia a su lado en
+  el tooltip. KQRS está licenciada en Golden Valley y transmite desde Shoreview, a quince
+  kilómetros, y es la segunda la que dice hacia dónde apuntar una antena.
+- Google Maps se consideró y se descartó: su API de geocodificación exige clave y cuenta
+  de facturación, algo que no puede viajar dentro de un plugin público.
+- La caché en memoria y disco de la consulta a la FCC y del geocodificador es ahora el
+  mismo código, y el fichero que escribe lleva versión de formato. Sin ella, la caché
+  escrita por la 3.3 se releía como «el servicio no tiene registro» y habría dejado los
+  campos de licencia vacíos durante los treinta días de su vigencia tras actualizar.
+
 ## Sin publicar — compilación de desarrollo 3.3
 
 - Nueva fila de **información de la emisora** bajo los datos de la canción, con el **eslogan**,

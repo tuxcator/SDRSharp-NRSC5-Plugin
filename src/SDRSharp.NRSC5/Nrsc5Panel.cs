@@ -288,15 +288,23 @@ internal sealed class Nrsc5Panel : UserControl
     }
 
     /// <summary>
-    /// Community of licence once the FCC answers. Until then the transmitter site from
-    /// SIS is shown, because it arrives seconds earlier and is the more useful of the
-    /// two for anyone chasing the signal.
+    /// The town the transmitter stands in, which is what a listener wants when they are
+    /// deciding where to point an antenna. It is regularly not the community of licence -
+    /// KQRS is licensed to Golden Valley and transmits from Shoreview - so the licence
+    /// town is the fallback rather than the headline, and both are in the tooltip.
+    ///
+    /// Raw coordinates are the last resort: they are the one thing here that reads as a
+    /// failure rather than as an answer.
     /// </summary>
     private static string DescribeLocation(StationFacts facts)
     {
+        if (facts.SitePlace.Length > 0) return facts.SitePlace;
         if (facts.Place.Length > 0) return facts.Place;
-        if (facts.HasLocation) return $"{Math.Abs(facts.Latitude):0.000}{(facts.Latitude < 0 ? "S" : "N")}  {Math.Abs(facts.Longitude):0.000}{(facts.Longitude < 0 ? "W" : "E")}";
-        return facts.Lookup == StationLookupState.Pending ? "Looking up..." : "--";
+        if (facts.SiteLookup == StationLookupState.Pending || facts.Lookup == StationLookupState.Pending)
+            return "Looking up...";
+        if (facts.HasLocation)
+            return $"{Math.Abs(facts.Latitude):0.000}{(facts.Latitude < 0 ? "S" : "N")}  {Math.Abs(facts.Longitude):0.000}{(facts.Longitude < 0 ? "W" : "E")}";
+        return "--";
     }
 
     private static string DescribeStation(StationFacts facts)
@@ -307,12 +315,18 @@ internal sealed class Nrsc5Panel : UserControl
         if (facts.Licensee.Length > 0) lines.Add($"Licensee: {facts.Licensee}");
         if (facts.StationClass.Length > 0) lines.Add($"Class: {facts.StationClass}");
         if (facts.HaatMeters > 0) lines.Add($"HAAT: {facts.HaatMeters:0.#} m");
+        // Spelt out side by side, because the two towns differ often enough that showing
+        // one of them unlabelled would be quietly misleading.
+        if (facts.SitePlace.Length > 0)
+            lines.Add($"Transmitter town: {facts.SitePlace}" +
+                      (facts.SiteSource.Length > 0 ? $" ({facts.SiteSource})" : ""));
+        if (facts.Place.Length > 0) lines.Add($"Community of licence: {facts.Place}");
         if (facts.HasLocation)
-            lines.Add($"Transmitter: {facts.Latitude:0.0000}, {facts.Longitude:0.0000} at {facts.Altitude} m");
+            lines.Add($"Transmitter site: {facts.Latitude:0.0000}, {facts.Longitude:0.0000} at {facts.Altitude} m");
         lines.Add(facts.Lookup switch
         {
             StationLookupState.Pending => "Querying the FCC licence database...",
-            StationLookupState.Resolved => "Licence data: FCC FM Query. Slogan and site: SIS.",
+            StationLookupState.Resolved => "Licence data: FCC FM Query. Slogan and coordinates: SIS.",
             StationLookupState.NotFound => "This facility ID is not in the FCC FM database.",
             StationLookupState.Failed => "The FCC lookup failed; retrying on the next tune.",
             StationLookupState.Unsupported => $"Licensed outside the US ({facts.CountryCode}); no FCC record.",

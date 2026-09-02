@@ -127,15 +127,28 @@ signal, and its four fields come from three different places:
   displays. HD Radio does not transmit it and no database publishes it. Three-letter call signs are
   an exception table in the standard rather than a formula, and Canadian and Mexican PI codes are
   assigned rather than derived, so those stay blank instead of being guessed.
-- **Location** is the community of licence once the FCC answers. Until then the transmitter
-  coordinates from SIS are shown, because they arrive seconds earlier.
+- **Location** is the town the transmitter stands in, found by reverse geocoding the coordinates
+  SIS carries. This is regularly **not** the community of licence: KQRS is licensed to Golden
+  Valley and transmits from Shoreview, fifteen kilometres away. Both are in the tooltip, and the
+  community of licence is used in the cell if the geocoder cannot name the site.
 - **Power** is the licensed ERP.
 
-Location and power are looked up in the FCC's public [FM Query](https://www.fcc.gov/media/radio/fm-query)
-service, keyed by the facility ID the station transmits. That is public-domain government data and
-needs no account. Answers are cached on disk for 30 days under
-`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, the query runs off the decoder thread, and if it
-fails only those two fields stay blank. Stations licensed outside the US are not queried.
+Power and the community of licence are looked up in the FCC's public
+[FM Query](https://www.fcc.gov/media/radio/fm-query) service, keyed by the facility ID the station
+transmits. The transmitter town comes from the
+[US Census geocoder](https://geocoding.geo.census.gov/geocoder/), with OpenStreetMap's
+[Nominatim](https://nominatim.openstreetmap.org/) as the fallback and for stations outside the
+United States. All three are public and need no account; the Census is the better of the two
+geocoders on a transmitter site, because towers stand in unincorporated country more often than not
+and it still names those.
+
+Answers are cached on disk under `%LOCALAPPDATA%\SDRSharp.NRSC5\` — 30 days for licences, 180 for
+transmitter sites. The queries run off the decoder thread, and if they fail only those fields stay
+blank. Nominatim's usage policy is respected: an identifying User-Agent and at most one request per
+second.
+
+Google Maps is not used. Its geocoding API requires an API key and a billing account, which cannot
+ship inside a public plugin.
 
 The plugin does not read `radio-locator.com` or `fmlist.org`. The pages holding this data are
 `Disallow`ed to every user agent in both sites' `robots.txt`, and fmlist has no unauthenticated API.

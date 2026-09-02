@@ -14,5 +14,7 @@
     <Compile Include="..\..\src\SDRSharp.NRSC5\PluginInfo.cs" />
     <Compile Include="..\..\src\SDRSharp.NRSC5\StationFacts.cs" />
     <Compile Include="..\..\src\SDRSharp.NRSC5\FccStationDirectory.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\LookupCache.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\ReverseGeocoder.cs" />
   </ItemGroup>
 </Project>
