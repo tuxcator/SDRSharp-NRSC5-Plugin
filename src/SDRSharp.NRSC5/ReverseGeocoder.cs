@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace SDRSharp.NRSC5;
 
 /// <summary>The populated place a transmitter stands in, and which service named it.</summary>
-internal sealed record GeocodedSite(string City, string State, string Source)
+internal sealed record GeocodedSite(string City, string State, string CountryCode, string Source)
 {
     public string Place => (City.Length, State.Length) switch
     {
@@ -146,7 +146,8 @@ internal sealed class ReverseGeocoder : IDisposable
         }
 
         if (city is null && state is null) return null;
-        return new GeocodedSite(city ?? "", state ?? "", "US Census");
+        // The Census only answers for points inside the United States, so a hit is one.
+        return new GeocodedSite(city ?? "", state ?? "", "US", "US Census");
 
         static string? Layer(JsonElement geographies, string name, string field)
         {
@@ -188,7 +189,11 @@ internal sealed class ReverseGeocoder : IDisposable
         }
         if (state is null && address.TryGetProperty("state", out var name)) state = name.GetString()?.Trim();
 
+        var country = address.TryGetProperty("country_code", out var iso2)
+            ? iso2.GetString()?.Trim().ToUpperInvariant() ?? ""
+            : "";
+
         if (city is null && state is null) return null;
-        return new GeocodedSite(city ?? "", state ?? "", "OpenStreetMap");
+        return new GeocodedSite(city ?? "", state ?? "", country, "OpenStreetMap");
     }
 }

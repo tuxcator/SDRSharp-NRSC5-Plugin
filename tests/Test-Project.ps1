@@ -34,7 +34,8 @@ foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5
     'Nrsc5Event.StationSlogan','Nrsc5Event.StationId','Nrsc5Event.StationLocation',
     'StationFactsChanged','ResetStationFacts','BeginFccLookup','PiCodeFor','InfoCard',
     'PI CODE','LOCATION','POWER',
-    'ReverseGeocoder','ParseCensus','ParseNominatim','BeginSiteLookup','SitePlace','IsPlausible') {
+    'ReverseGeocoder','ParseCensus','ParseNominatim','BeginSiteLookup','SitePlace','IsPlausible',
+    'SiteContradictsCallsign','CountryFromCallsign','EffectiveCountry') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
 }
 

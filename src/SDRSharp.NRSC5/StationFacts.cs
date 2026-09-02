@@ -46,12 +46,13 @@ internal sealed record StationFacts(
     StationLookupState Lookup,
     string SiteCity,
     string SiteState,
+    string SiteCountry,
     string SiteSource,
     StationLookupState SiteLookup)
 {
     public static StationFacts Empty { get; } = new(
         "", "", "", "", 0, 0, 0, 0, false, "", "", "", "", 0, 0, StationLookupState.Idle,
-        "", "", "", StationLookupState.Idle);
+        "", "", "", "", StationLookupState.Idle);
 
     /// <summary>Community of licence, as the FCC records it. An administrative fact.</summary>
     public string Place => Join(City, State);
@@ -73,6 +74,44 @@ internal sealed record StationFacts(
 
     /// <summary>PI code derived from the call sign, or null when the rule does not apply.</summary>
     public int? PiCode => PiCodeFor(Callsign);
+
+    /// <summary>
+    /// The country the call sign itself declares. Of everything a station puts in its SIS
+    /// frames the call sign is the one it gets right, because it is what listeners read;
+    /// the country code, the facility ID and the coordinates are set once at installation
+    /// and are regularly left at whatever the exciter shipped with.
+    /// </summary>
+    public string CallsignCountry => CountryFromCallsign(Callsign);
+
+    /// <summary>
+    /// True when the transmitter site the station broadcasts falls in a different country
+    /// from the one its call sign declares, which means the site cannot be believed.
+    ///
+    /// This is not hypothetical: XHPQ-FM, received in Queretaro, broadcasts coordinates in
+    /// San Marcos, California, some 2500 km away, along with a US country code and an FCC
+    /// facility ID of 22 that no FCC database lists. Naming that town in the panel would
+    /// be stating a falsehood as a fact.
+    /// </summary>
+    public bool SiteContradictsCallsign =>
+        SiteCountry.Length > 0 && CallsignCountry.Length > 0 &&
+        !SiteCountry.Equals(CallsignCountry, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Country from the call sign prefix, under the ITU allocations that cover every
+    /// country with HD Radio: K and W are the United States, X is Mexico, C is Canada.
+    /// </summary>
+    internal static string CountryFromCallsign(string? callsign)
+    {
+        var call = NormalizeCallsign(callsign);
+        if (call.Length < 3) return "";
+        return call[0] switch
+        {
+            'K' or 'W' => "US",
+            'X' => "MX",
+            'C' => "CA",
+            _ => ""
+        };
+    }
 
     /// <summary>
     /// RBDS call sign to PI code, per the rule in the NRSC-4 US RBDS standard: read the

@@ -889,7 +889,7 @@ internal sealed class Nrsc5Engine : IDisposable
         var country = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationIdCountryCode)).Trim();
         var facilityId = Marshal.ReadInt32(union, Nrsc5Layout.StationIdFacilityId);
         UpdateFacts(f => f with { CountryCode = country, FacilityId = facilityId });
-        BeginFccLookup(facilityId, country);
+        BeginFccLookup(facilityId, EffectiveCountry());
     }
 
     /// <summary>
@@ -948,13 +948,12 @@ internal sealed class Nrsc5Engine : IDisposable
         if (!ReverseGeocoder.IsPlausible(latitude, longitude)) return;
 
         var key = LookupCache<GeocodedSite>.CoordinateKey(latitude, longitude);
-        string country;
+        var country = EffectiveCountry();
         CancellationToken token;
         lock (_factsGate)
         {
             if (_geocodedSite == key) return;
             _geocodedSite = key;
-            country = _facts.CountryCode;
             _lookupCancellation ??= new CancellationTokenSource();
             token = _lookupCancellation.Token;
         }
@@ -974,6 +973,7 @@ internal sealed class Nrsc5Engine : IDisposable
                         {
                             SiteCity = site.City,
                             SiteState = site.State,
+                            SiteCountry = site.CountryCode,
                             SiteSource = site.Source,
                             SiteLookup = StationLookupState.Resolved
                         });
@@ -1011,6 +1011,17 @@ internal sealed class Nrsc5Engine : IDisposable
                 HaatMeters = record.HaatMeters,
                 Lookup = StationLookupState.Resolved
             });
+    }
+
+    /// <summary>
+    /// Which country's databases to ask. The call sign wins over the country code in the
+    /// SIS frames whenever it says anything, because a station that has never touched its
+    /// identity block still gets its own call sign right.
+    /// </summary>
+    private string EffectiveCountry()
+    {
+        var facts = Facts;
+        return facts.CallsignCountry.Length > 0 ? facts.CallsignCountry : facts.CountryCode;
     }
 
     /// <summary>Ignored once the dial has moved on, so a late answer cannot land on a new station.</summary>

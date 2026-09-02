@@ -137,6 +137,13 @@ señal, y sus cuatro campos vienen de tres sitios distintos:
   el tooltip, y si el geocodificador no puede nombrar el sitio, la celda cae a la de licencia.
 - La **potencia** es la ERP licenciada.
 
+No todas las emisoras dicen la verdad sobre sí mismas. El bloque de identidad de SIS —país,
+identificador de instalación de la FCC, coordenadas del transmisor— se configura una vez en
+la instalación y suele quedarse con lo que traía el excitador, mientras que el indicativo se
+mantiene correcto porque es lo que lee el oyente. Por eso el indicativo decide a qué país
+pertenece la emisora, y cuando las coordenadas geocodifican a otro país la celda las muestra
+crudas con un interrogante en vez de nombrar un pueblo desde el que la emisora no transmite.
+
 La potencia y la ciudad de licencia se consultan en el servicio público
 [FM Query](https://www.fcc.gov/media/radio/fm-query) de la FCC, usando el identificador de
 instalación que la emisora transmite. La población del transmisor sale del
