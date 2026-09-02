@@ -2,6 +2,24 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
+## Unreleased — development build 3.3.1
+
+- **LOCATION now names the town the transmitter stands in**, not a pair of coordinates.
+  The coordinates SIS carries are reverse geocoded through the US Census geocoder, which
+  is public-domain government data and needs no key, falling back to OpenStreetMap's
+  Nominatim outside the United States. Nominatim's policy is respected: an identifying
+  User-Agent, at most one request per second, and results cached for 180 days.
+- The transmitter town is regularly **not** the community of licence, so both are now
+  shown: the transmitter town in the cell, and the community of licence beside it in the
+  tooltip. KQRS is licensed to Golden Valley and transmits from Shoreview, fifteen
+  kilometres away, and it is the second one that says where to point an antenna.
+- Google Maps was considered and not used: its geocoding API requires a key and a billing
+  account, which cannot ship inside a public plugin.
+- The memory-and-disk cache behind the FCC query and the geocoder is now one shared piece
+  of code, and the file it writes carries a format version. Without it, the cache written
+  by build 3.3 was read back as "the service has no record" and would have blanked the
+  licence fields for the thirty days of its lifetime after upgrading.
+
 ## Unreleased — development build 3.3
 
 - New **station information** row under the song details, showing the station's **slogan**,

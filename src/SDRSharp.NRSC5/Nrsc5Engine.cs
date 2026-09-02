@@ -62,6 +62,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private readonly object _bitrateGate = new();
     private readonly object _factsGate = new();
     private readonly FccStationDirectory _fccDirectory = new();
+    private readonly ReverseGeocoder _geocoder = new();
     private readonly PcmRingBuffer _audio = new((int)(Nrsc5Native.AudioSampleRate * 3));
     private readonly PolyphaseResampler _resampler = new();
     private readonly SurroundProcessor _surround = new();
@@ -108,6 +109,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private Nrsc5Status _status = Nrsc5Status.Idle;
     private StationFacts _facts = StationFacts.Empty;
     private int _lookedUpFacilityId;
+    private string _geocodedSite = "";
     private CancellationTokenSource? _lookupCancellation;
 
     private readonly record struct CachedImage(byte[] Bytes, uint Mime, int Program);
@@ -482,6 +484,7 @@ internal sealed class Nrsc5Engine : IDisposable
             _lookupCancellation = null;
         }
         _fccDirectory.Dispose();
+        _geocoder.Dispose();
     }
 
     private void Start()
@@ -663,6 +666,7 @@ internal sealed class Nrsc5Engine : IDisposable
                         Altitude = altitude,
                         HasLocation = true
                     });
+                    BeginSiteLookup(latitude, longitude);
                     break;
             }
         }
@@ -910,9 +914,9 @@ internal sealed class Nrsc5Engine : IDisposable
         {
             if (_lookedUpFacilityId == facilityId) return;
             _lookedUpFacilityId = facilityId;
-            _lookupCancellation?.Cancel();
-            _lookupCancellation?.Dispose();
-            _lookupCancellation = new CancellationTokenSource();
+            // The token belongs to the station, not to this lookup: the licence query and
+            // the site geocoder run side by side and only a retune should cancel either.
+            _lookupCancellation ??= new CancellationTokenSource();
             token = _lookupCancellation.Token;
         }
 
@@ -931,6 +935,58 @@ internal sealed class Nrsc5Engine : IDisposable
             catch
             {
                 ApplyLookupState(facilityId, StationLookupState.Failed);
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Names the town the transmitter stands in. The coordinates arrive in SIS and repeat
+    /// every few seconds, so the lookup is keyed on them and only runs when they move.
+    /// </summary>
+    private void BeginSiteLookup(float latitude, float longitude)
+    {
+        if (!ReverseGeocoder.IsPlausible(latitude, longitude)) return;
+
+        var key = LookupCache<GeocodedSite>.CoordinateKey(latitude, longitude);
+        string country;
+        CancellationToken token;
+        lock (_factsGate)
+        {
+            if (_geocodedSite == key) return;
+            _geocodedSite = key;
+            country = _facts.CountryCode;
+            _lookupCancellation ??= new CancellationTokenSource();
+            token = _lookupCancellation.Token;
+        }
+
+        UpdateFacts(f => f with { SiteLookup = StationLookupState.Pending });
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var site = await _geocoder.LookupAsync(latitude, longitude, country, token).ConfigureAwait(false);
+                UpdateFacts(f => LookupCache<GeocodedSite>.CoordinateKey(f.Latitude, f.Longitude) != key
+                    ? f
+                    : site is null
+                        ? f with { SiteLookup = StationLookupState.NotFound }
+                        : f with
+                        {
+                            SiteCity = site.City,
+                            SiteState = site.State,
+                            SiteSource = site.Source,
+                            SiteLookup = StationLookupState.Resolved
+                        });
+            }
+            catch (OperationCanceledException)
+            {
+                // Retuned before the answer arrived; the new station starts its own lookup.
+            }
+            catch
+            {
+                UpdateFacts(f => LookupCache<GeocodedSite>.CoordinateKey(f.Latitude, f.Longitude) == key
+                    ? f with { SiteLookup = StationLookupState.Failed }
+                    : f);
             }
         }, CancellationToken.None);
     }
@@ -966,6 +1022,7 @@ internal sealed class Nrsc5Engine : IDisposable
         lock (_factsGate)
         {
             _lookedUpFacilityId = 0;
+            _geocodedSite = "";
             _lookupCancellation?.Cancel();
             _lookupCancellation?.Dispose();
             _lookupCancellation = null;

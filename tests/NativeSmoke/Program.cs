@@ -4,6 +4,7 @@ using SDRSharp.NRSC5;
 VerifyEventLayout();
 VerifyPiCodes();
 VerifyFccParsing();
+VerifyGeocoding();
 
 if (args.Length != 1) throw new ArgumentException("Indique la carpeta NRSC5Runtime.");
 var runtime = Path.GetFullPath(args[0]);
@@ -143,6 +144,72 @@ static void VerifyFccParsing()
     {
         if (actual != expected)
             throw new InvalidOperationException($"Campo {name}: se esperaba '{expected}', se obtuvo '{actual}'.");
+    }
+}
+
+// La ubicacion que sale en el panel es la del transmisor, que no es la ciudad de
+// licencia: KQRS esta licenciada en Golden Valley y transmite desde Shoreview. Las
+// respuestas de abajo son reales, recortadas a los campos que se leen.
+static void VerifyGeocoding()
+{
+    // Sitio urbano: el Census lo resuelve como lugar incorporado.
+    CheckCensus("""
+        {"result":{"geographies":{
+          "States":[{"BASENAME":"Minnesota","STUSAB":"MN","NAME":"Minnesota"}],
+          "Incorporated Places":[{"BASENAME":"Shoreview","NAME":"Shoreview city"}],
+          "Counties":[{"BASENAME":"Ramsey","NAME":"Ramsey County"}]}}}
+        """, "Shoreview, MN");
+
+    // Sitio rural: no hay lugar incorporado, pero si un census designated place. La
+    // mayoria de las torres estan en campo abierto, asi que este es el caso normal.
+    CheckCensus("""
+        {"result":{"geographies":{
+          "States":[{"BASENAME":"Colorado","STUSAB":"CO"}],
+          "Census Designated Places":[{"BASENAME":"Meridian"}],
+          "Counties":[{"BASENAME":"Douglas"}]}}}
+        """, "Meridian, CO");
+
+    // Ni lugar ni CDP: queda el condado, que sigue siendo mejor que unas coordenadas.
+    CheckCensus("""
+        {"result":{"geographies":{
+          "States":[{"BASENAME":"Nevada","STUSAB":"NV"}],
+          "Counties":[{"BASENAME":"Nye"}]}}}
+        """, "Nye Co., NV");
+
+    if (ReverseGeocoder.ParseCensus("""{"result":{"geographies":{}}}""") is not null)
+        throw new InvalidOperationException("Una respuesta del Census sin capas debe devolver nada.");
+
+    // Fuera de Estados Unidos manda OpenStreetMap. El estado sale del codigo ISO porque
+    // "Baja California" entero no cabe en la celda junto al nombre de la ciudad.
+    var tijuana = ReverseGeocoder.ParseNominatim("""
+        {"address":{"city":"Tijuana","county":"Municipio de Tijuana","state":"Baja California",
+         "ISO3166-2-lvl4":"MX-BCN","country_code":"mx"}}
+        """) ?? throw new InvalidOperationException("No se reconocio la respuesta de Nominatim.");
+    if (tijuana.Place != "Tijuana, BCN")
+        throw new InvalidOperationException($"Nominatim: se esperaba 'Tijuana, BCN', se obtuvo '{tijuana.Place}'.");
+
+    // OSM archiva los nucleos bajo la etiqueta que use la administracion local.
+    var village = ReverseGeocoder.ParseNominatim("""
+        {"address":{"village":"Lostwithiel","state":"England","ISO3166-2-lvl4":"GB-ENG"}}
+        """) ?? throw new InvalidOperationException("No se reconocio un nucleo etiquetado como village.");
+    if (village.Place != "Lostwithiel, ENG")
+        throw new InvalidOperationException($"Nominatim village: se obtuvo '{village.Place}'.");
+
+    // 0,0 es una coordenada real en el Atlantico: una emisora que aun no ha mandado su
+    // posicion no debe acabar geocodificada ahi.
+    if (ReverseGeocoder.IsPlausible(0, 0))
+        throw new InvalidOperationException("0,0 no debe considerarse una posicion valida.");
+    if (!ReverseGeocoder.IsPlausible(45.0583f, -93.1244f))
+        throw new InvalidOperationException("Una posicion real debe aceptarse.");
+
+    Console.WriteLine("[OK] La geocodificacion inversa nombra el sitio del transmisor en EE.UU. y fuera.");
+
+    static void CheckCensus(string body, string expected)
+    {
+        var site = ReverseGeocoder.ParseCensus(body)
+            ?? throw new InvalidOperationException("No se reconocio la respuesta del Census.");
+        if (site.Place != expected)
+            throw new InvalidOperationException($"Census: se esperaba '{expected}', se obtuvo '{site.Place}'.");
     }
 }
 

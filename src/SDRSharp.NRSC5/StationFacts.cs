@@ -43,21 +43,32 @@ internal sealed record StationFacts(
     string StationClass,
     double ErpKw,
     double HaatMeters,
-    StationLookupState Lookup)
+    StationLookupState Lookup,
+    string SiteCity,
+    string SiteState,
+    string SiteSource,
+    StationLookupState SiteLookup)
 {
     public static StationFacts Empty { get; } = new(
-        "", "", "", "", 0, 0, 0, 0, false, "", "", "", "", 0, 0, StationLookupState.Idle);
+        "", "", "", "", 0, 0, 0, 0, false, "", "", "", "", 0, 0, StationLookupState.Idle,
+        "", "", "", StationLookupState.Idle);
+
+    /// <summary>Community of licence, as the FCC records it. An administrative fact.</summary>
+    public string Place => Join(City, State);
 
     /// <summary>
-    /// Community of licence when the FCC answered, otherwise nothing: the transmitter
-    /// coordinates from SIS are a site, not a place, and are shown separately.
+    /// Where the transmitter actually stands, from reverse geocoding the coordinates SIS
+    /// carries. Regularly a different town from the community of licence: KQRS is
+    /// licensed to Golden Valley and transmits from Shoreview.
     /// </summary>
-    public string Place => (City.Length, State.Length) switch
+    public string SitePlace => Join(SiteCity, SiteState);
+
+    private static string Join(string city, string state) => (city.Length, state.Length) switch
     {
         (0, 0) => "",
-        (_, 0) => City,
-        (0, _) => State,
-        _ => $"{City}, {State}"
+        (_, 0) => city,
+        (0, _) => state,
+        _ => $"{city}, {state}"
     };
 
     /// <summary>PI code derived from the call sign, or null when the rule does not apply.</summary>

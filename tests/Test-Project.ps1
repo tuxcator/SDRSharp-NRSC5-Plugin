@@ -16,6 +16,8 @@ $required = @(
     'src\SDRSharp.NRSC5\PluginInfo.cs',
     'src\SDRSharp.NRSC5\StationFacts.cs',
     'src\SDRSharp.NRSC5\FccStationDirectory.cs',
+    'src\SDRSharp.NRSC5\LookupCache.cs',
+    'src\SDRSharp.NRSC5\ReverseGeocoder.cs',
     'scripts\Get-Dependencies.ps1',
     'scripts\Build.ps1',
     'scripts\Install.ps1'
@@ -31,7 +33,8 @@ foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5
     'ReceiveSig','MarkProgramAvailable','StepProgram','ProgramMask','PanelFonts',
     'Nrsc5Event.StationSlogan','Nrsc5Event.StationId','Nrsc5Event.StationLocation',
     'StationFactsChanged','ResetStationFacts','BeginFccLookup','PiCodeFor','InfoCard',
-    'PI CODE','LOCATION','POWER') {
+    'PI CODE','LOCATION','POWER',
+    'ReverseGeocoder','ParseCensus','ParseNominatim','BeginSiteLookup','SitePlace','IsPlausible') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
 }
 
@@ -43,9 +46,24 @@ foreach ($forbidden in 'radio-locator','fmlist.org','cgi-bin/pat') {
         throw "El plugin no debe consultar ${forbidden}: su robots.txt lo prohibe."
     }
 }
-# La consulta a la FCC nunca puede bloquear el hilo del decodificador ni el de la interfaz.
+# Ninguna consulta de red puede bloquear el hilo del decodificador ni el de la interfaz.
 if ($source -match '\.LookupAsync\([^)]*\)\.(Result|GetAwaiter)') {
-    throw 'La consulta a la FCC debe esperarse con await, nunca bloqueando el hilo.'
+    throw 'Las consultas de red deben esperarse con await, nunca bloqueando el hilo.'
+}
+
+# La cache en disco cambio de forma entre la 3.3 y la 3.3.1. Sin version en el fichero,
+# la cache vieja se leia como "sin registro" y dejaba los campos vacios 30 dias.
+$cache = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\LookupCache.cs')
+if ($cache -notmatch 'FormatVersion') {
+    throw 'La cache en disco debe llevar version de formato para descartar la de builds anteriores.'
+}
+
+# Nominatim exige un User-Agent identificable y como mucho una peticion por segundo.
+$geo = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\ReverseGeocoder.cs')
+foreach ($required in 'UserAgent','NominatimInterval') {
+    if ($geo -notmatch [regex]::Escape($required)) {
+        throw "El geocodificador debe respetar la politica de Nominatim: falta $required."
+    }
 }
 
 if ($source -match 'AutoScroll\s*=\s*true' -or $source -match 'MinimumSize\s*=\s*new Size\(370, 700\)') {

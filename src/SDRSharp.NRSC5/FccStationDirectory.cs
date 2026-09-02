@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Net.Http;
-using System.Text.Json;
 
 namespace SDRSharp.NRSC5;
 
@@ -31,9 +30,6 @@ internal sealed class FccStationDirectory : IDisposable
     // "list=4" is the pipe-delimited output; the HTML modes would have to be scraped.
     private const string QueryFormat = "https://transition.fcc.gov/fcc-bin/fmq?facid={0}&list=4";
 
-    private static readonly TimeSpan CacheLifetime = TimeSpan.FromDays(30);
-    private const int MaxCacheEntries = 2000;
-
     // Column layout of a "list=4" row, from a live response:
     // |KQRS-FM |92.5 MHz |FM |223 |ND |H |C |- |LIC |GOLDEN VALLEY |MN |US
     // |BLH-19910814KB |100. kW |100. kW |315.0 |315.0 |35505 |N |45 |3 |29.8 | ...
@@ -53,21 +49,14 @@ internal sealed class FccStationDirectory : IDisposable
     private const int ColumnLicensee = 27;
 
     private readonly HttpClient _http;
-    private readonly object _gate = new();
-    private readonly Dictionary<int, CacheEntry> _cache = new();
-    private readonly Dictionary<int, Task<FccRecord?>> _inFlight = new();
-    private readonly string _cachePath;
-    private bool _cacheLoaded;
+    private readonly LookupCache<FccRecord> _cache =
+        new("fcc-fm-cache.json", TimeSpan.FromDays(30), 2000);
 
     public FccStationDirectory()
     {
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd(
             $"SDRSharp-NRSC5-Plugin/{PluginInfo.DevelopmentVersion} (+https://github.com/tuxcator/SDRSharp-NRSC5-Plugin)");
-        _cachePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "SDRSharp.NRSC5",
-            "fcc-fm-cache.json");
     }
 
     public void Dispose() => _http.Dispose();
@@ -79,41 +68,15 @@ internal sealed class FccStationDirectory : IDisposable
     public Task<FccRecord?> LookupAsync(int facilityId, CancellationToken token)
     {
         if (facilityId <= 0) return Task.FromResult<FccRecord?>(null);
-
-        lock (_gate)
-        {
-            EnsureCacheLoaded();
-            if (_cache.TryGetValue(facilityId, out var cached) &&
-                DateTimeOffset.UtcNow - cached.Fetched < CacheLifetime)
-                return Task.FromResult(cached.Record);
-
-            if (_inFlight.TryGetValue(facilityId, out var running)) return running;
-
-            var task = FetchAsync(facilityId, token);
-            _inFlight[facilityId] = task;
-            // Registered while the lock is held, so the continuation cannot clear the
-            // entry before it has been added even if the fetch already finished.
-            _ = task.ContinueWith(
-                _ => { lock (_gate) _inFlight.Remove(facilityId); },
-                CancellationToken.None,
-                TaskContinuationOptions.None,
-                TaskScheduler.Default);
-            return task;
-        }
-    }
-
-    /// <summary>
-    /// A null result means the FCC answered but does not list the facility, which is
-    /// worth caching. Being offline or blocked throws instead, so nothing is cached and
-    /// the next tune to the same station retries.
-    /// </summary>
-    private async Task<FccRecord?> FetchAsync(int facilityId, CancellationToken token)
-    {
-        var url = string.Format(CultureInfo.InvariantCulture, QueryFormat, facilityId);
-        var body = await _http.GetStringAsync(url, token).ConfigureAwait(false);
-        var record = Parse(body, facilityId);
-        Store(facilityId, record);
-        return record;
+        return _cache.GetOrAddAsync(
+            facilityId.ToString(CultureInfo.InvariantCulture),
+            async cancellation =>
+            {
+                var url = string.Format(CultureInfo.InvariantCulture, QueryFormat, facilityId);
+                var body = await _http.GetStringAsync(url, cancellation).ConfigureAwait(false);
+                return Parse(body, facilityId);
+            },
+            token);
     }
 
     /// <summary>
@@ -209,64 +172,4 @@ internal sealed class FccStationDirectory : IDisposable
         return string.Join(' ', words);
     }
 
-    private void Store(int facilityId, FccRecord? record)
-    {
-        lock (_gate)
-        {
-            _cache[facilityId] = new CacheEntry(record, DateTimeOffset.UtcNow);
-            TrimCache();
-            SaveCache();
-        }
-    }
-
-    /// <summary>Caller holds <see cref="_gate"/>.</summary>
-    private void TrimCache()
-    {
-        if (_cache.Count <= MaxCacheEntries) return;
-        foreach (var stale in _cache.OrderBy(entry => entry.Value.Fetched)
-                     .Take(_cache.Count - MaxCacheEntries)
-                     .Select(entry => entry.Key)
-                     .ToList())
-            _cache.Remove(stale);
-    }
-
-    /// <summary>Caller holds <see cref="_gate"/>.</summary>
-    private void EnsureCacheLoaded()
-    {
-        if (_cacheLoaded) return;
-        _cacheLoaded = true;
-        try
-        {
-            if (!File.Exists(_cachePath)) return;
-            var stored = JsonSerializer.Deserialize<Dictionary<string, CacheEntry>>(File.ReadAllText(_cachePath));
-            if (stored is null) return;
-            foreach (var (key, entry) in stored)
-                if (int.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id))
-                    _cache[id] = entry;
-        }
-        catch
-        {
-            // A corrupt or unreadable cache is not worth reporting: it is rebuilt on use.
-        }
-    }
-
-    /// <summary>Caller holds <see cref="_gate"/>.</summary>
-    private void SaveCache()
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(_cachePath);
-            if (directory is not null) Directory.CreateDirectory(directory);
-            var stored = _cache.ToDictionary(
-                entry => entry.Key.ToString(CultureInfo.InvariantCulture),
-                entry => entry.Value);
-            File.WriteAllText(_cachePath, JsonSerializer.Serialize(stored));
-        }
-        catch
-        {
-            // Read-only or roaming profile. The in-memory cache still does its job.
-        }
-    }
-
-    internal sealed record CacheEntry(FccRecord? Record, DateTimeOffset Fetched);
 }

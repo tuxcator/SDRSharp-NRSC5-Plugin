@@ -131,16 +131,28 @@ señal, y sus cuatro campos vienen de tres sitios distintos:
   RDS. HD Radio no lo transmite y ninguna base de datos lo publica. Los indicativos de tres letras
   son una tabla de excepciones del estándar en vez de una fórmula, y los códigos PI de Canadá y
   México se asignan en lugar de derivarse, así que esos quedan en blanco en vez de inventarse.
-- La **ubicación** es la ciudad de licencia una vez responde la FCC. Hasta entonces se muestran las
-  coordenadas del transmisor que llegan por SIS, porque aparecen unos segundos antes.
+- La **ubicación** es la población donde está el transmisor, obtenida geocodificando las
+  coordenadas que llegan por SIS. **No** suele coincidir con la ciudad de licencia: KQRS está
+  licenciada en Golden Valley y transmite desde Shoreview, a quince kilómetros. Las dos aparecen en
+  el tooltip, y si el geocodificador no puede nombrar el sitio, la celda cae a la de licencia.
 - La **potencia** es la ERP licenciada.
 
-La ubicación y la potencia se consultan en el servicio público [FM Query](https://www.fcc.gov/media/radio/fm-query)
-de la FCC, usando el identificador de instalación que la emisora transmite. Son datos de dominio
-público del gobierno y no necesitan cuenta. Las respuestas se guardan en disco durante 30 días en
-`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, la consulta corre fuera del hilo del decodificador
-y, si falla, solo esos dos campos quedan vacíos. Las emisoras licenciadas fuera de Estados Unidos no
-se consultan.
+La potencia y la ciudad de licencia se consultan en el servicio público
+[FM Query](https://www.fcc.gov/media/radio/fm-query) de la FCC, usando el identificador de
+instalación que la emisora transmite. La población del transmisor sale del
+[geocodificador del US Census](https://geocoding.geo.census.gov/geocoder/), con
+[Nominatim](https://nominatim.openstreetmap.org/) de OpenStreetMap como respaldo y para emisoras
+fuera de Estados Unidos. Los tres son públicos y no piden cuenta; el del Census es el mejor de los
+dos geocodificadores sobre un sitio de transmisión, porque las torres están en zona no incorporada
+más veces que no y aun así las nombra.
+
+Las respuestas se guardan en disco en `%LOCALAPPDATA%\SDRSharp.NRSC5\`: 30 días las licencias y 180
+los emplazamientos. Las consultas corren fuera del hilo del decodificador y, si fallan, solo esos
+campos quedan vacíos. Se respeta la política de uso de Nominatim: User-Agent identificable y como
+mucho una petición por segundo.
+
+Google Maps no se usa. Su API de geocodificación exige clave y cuenta de facturación, algo que no
+puede viajar dentro de un plugin público.
 
 El plugin no lee `radio-locator.com` ni `fmlist.org`. Las páginas con estos datos están marcadas como
 `Disallow` para todo agente en el `robots.txt` de ambos sitios, y fmlist no tiene API sin
