@@ -2,6 +2,24 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
+## Unreleased — development build 3.3.2
+
+- **A transmitter site that contradicts the call sign is now flagged rather than named.**
+  Build 3.3.1 stated whatever town the coordinates geocoded to as fact. Tuning XHPQ-FM
+  through a receiver in Querétaro showed what that costs: the station broadcasts
+  coordinates in San Marcos, California, some 2500 km away, together with a US country
+  code and an FCC facility ID of 22 that no FCC database lists. Its exciter was never
+  configured. The panel confidently named a town the station demonstrably does not
+  transmit from.
+- The call sign now decides which country a station belongs to, overriding the country
+  code in its SIS frames. Of everything in the identity block it is the one field a
+  station gets right, because it is what listeners read; the rest is set once at
+  installation and often left at whatever the exciter shipped with. `K` and `W` are the
+  United States, `X` is Mexico, `C` is Canada.
+- When the geocoded site lands in a different country from the call sign, the cell shows
+  the raw coordinates with a question mark and the tooltip says what is wrong. The FCC is
+  no longer queried at all for a station whose call sign is not American.
+
 ## Unreleased — development build 3.3.1
 
 - **LOCATION now names the town the transmitter stands in**, not a pair of coordinates.

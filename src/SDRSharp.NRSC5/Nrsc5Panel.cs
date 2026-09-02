@@ -298,6 +298,10 @@ internal sealed class Nrsc5Panel : UserControl
     /// </summary>
     private static string DescribeLocation(StationFacts facts)
     {
+        // A site in the wrong country is the station's own misconfiguration. The raw
+        // coordinates are still what it broadcasts, so they are shown, flagged, rather
+        // than dressed up as a town it demonstrably does not transmit from.
+        if (facts.SiteContradictsCallsign) return $"{facts.Latitude:0.00}, {facts.Longitude:0.00}  ?";
         if (facts.SitePlace.Length > 0) return facts.SitePlace;
         if (facts.Place.Length > 0) return facts.Place;
         if (facts.SiteLookup == StationLookupState.Pending || facts.Lookup == StationLookupState.Pending)
@@ -317,7 +321,11 @@ internal sealed class Nrsc5Panel : UserControl
         if (facts.HaatMeters > 0) lines.Add($"HAAT: {facts.HaatMeters:0.#} m");
         // Spelt out side by side, because the two towns differ often enough that showing
         // one of them unlabelled would be quietly misleading.
-        if (facts.SitePlace.Length > 0)
+        if (facts.SiteContradictsCallsign)
+            lines.Add($"The broadcast site falls in {facts.SiteCountry} but the call sign is " +
+                      $"{facts.CallsignCountry}. This station's SIS location is wrong; " +
+                      $"it points at {facts.SitePlace}.");
+        else if (facts.SitePlace.Length > 0)
             lines.Add($"Transmitter town: {facts.SitePlace}" +
                       (facts.SiteSource.Length > 0 ? $" ({facts.SiteSource})" : ""));
         if (facts.Place.Length > 0) lines.Add($"Community of licence: {facts.Place}");

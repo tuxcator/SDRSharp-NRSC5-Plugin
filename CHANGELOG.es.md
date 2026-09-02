@@ -2,6 +2,24 @@
 
 *[English version](CHANGELOG.md)*
 
+## Sin publicar — compilación de desarrollo 3.3.2
+
+- **Un emplazamiento que contradice al indicativo se marca en vez de nombrarse.** La 3.3.1
+  daba por hecho el pueblo al que geocodificaban las coordenadas. Sintonizar XHPQ-FM desde
+  un receptor en Querétaro dejó claro lo que eso cuesta: la emisora transmite coordenadas
+  en San Marcos, California, a unos 2500 km, junto con un código de país US y un
+  identificador de instalación de la FCC, el 22, que no figura en ninguna base de la FCC.
+  Su excitador nunca se configuró. El panel nombraba con aplomo un pueblo desde el que la
+  emisora demostrablemente no transmite.
+- El indicativo decide ahora a qué país pertenece una emisora, por encima del código de
+  país de sus tramas SIS. De todo el bloque de identidad es el único campo que una emisora
+  acierta, porque es lo que lee el oyente; el resto se configura una vez en la instalación
+  y suele quedarse con lo que traía el excitador. `K` y `W` son Estados Unidos, `X` México
+  y `C` Canadá.
+- Cuando el sitio geocodificado cae en un país distinto al del indicativo, la celda muestra
+  las coordenadas crudas con un interrogante y el tooltip explica qué falla. A una emisora
+  cuyo indicativo no es estadounidense ya no se le consulta la FCC.
+
 ## Sin publicar — compilación de desarrollo 3.3.1
 
 - **LOCATION ahora nombra la población donde está el transmisor**, en vez de un par de

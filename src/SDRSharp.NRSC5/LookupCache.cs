@@ -86,9 +86,10 @@ internal sealed class LookupCache<TValue> where TValue : class
     /// differently; loading one of those as the current shape yielded an entry per
     /// station whose value was null, which reads as "the service has no record" and
     /// would have blanked the licence fields for the thirty days of its lifetime.
-    /// Raise this whenever <see cref="Entry"/> or TValue changes shape.
+    /// Raise this whenever <see cref="Entry"/> or TValue changes shape. Version 2 added
+    /// the country to a geocoded site.
     /// </summary>
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
 
     /// <summary>Caller holds <see cref="_gate"/>.</summary>
     private void EnsureLoaded()

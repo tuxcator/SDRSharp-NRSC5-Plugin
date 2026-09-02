@@ -5,6 +5,7 @@ VerifyEventLayout();
 VerifyPiCodes();
 VerifyFccParsing();
 VerifyGeocoding();
+VerifySuspectSites();
 
 if (args.Length != 1) throw new ArgumentException("Indique la carpeta NRSC5Runtime.");
 var runtime = Path.GetFullPath(args[0]);
@@ -187,6 +188,8 @@ static void VerifyGeocoding()
         """) ?? throw new InvalidOperationException("No se reconocio la respuesta de Nominatim.");
     if (tijuana.Place != "Tijuana, BCN")
         throw new InvalidOperationException($"Nominatim: se esperaba 'Tijuana, BCN', se obtuvo '{tijuana.Place}'.");
+    if (tijuana.CountryCode != "MX")
+        throw new InvalidOperationException($"Nominatim debe informar el pais, se obtuvo '{tijuana.CountryCode}'.");
 
     // OSM archiva los nucleos bajo la etiqueta que use la administracion local.
     var village = ReverseGeocoder.ParseNominatim("""
@@ -210,6 +213,44 @@ static void VerifyGeocoding()
             ?? throw new InvalidOperationException("No se reconocio la respuesta del Census.");
         if (site.Place != expected)
             throw new InvalidOperationException($"Census: se esperaba '{expected}', se obtuvo '{site.Place}'.");
+    }
+}
+
+// Caso real: XHPQ-FM, recibida en Queretaro, emite unas coordenadas en San Marcos,
+// California, a 2500 km, con codigo de pais US y un facility ID 22 que la FCC no lista.
+// Su excitador nunca se configuro. El indicativo es lo unico que una emisora asi acierta,
+// porque es lo que lee el oyente, asi que es el indicativo el que decide.
+static void VerifySuspectSites()
+{
+    ExpectCountry("KQRS-FM", "US");
+    ExpectCountry("WKST", "US");
+    ExpectCountry("XHPQ-FM", "MX");
+    ExpectCountry("CBLA-FM", "CA");
+    ExpectCountry("", "");
+
+    var honest = StationFacts.Empty with { Callsign = "KQRS-FM", SiteCity = "Shoreview", SiteState = "MN", SiteCountry = "US" };
+    if (honest.SiteContradictsCallsign)
+        throw new InvalidOperationException("Una emisora estadounidense en suelo estadounidense no es sospechosa.");
+
+    var xhpq = StationFacts.Empty with { Callsign = "XHPQ-FM", SiteCity = "San Marcos", SiteState = "CA", SiteCountry = "US" };
+    if (!xhpq.SiteContradictsCallsign)
+        throw new InvalidOperationException("Un indicativo mexicano con emplazamiento en EE.UU. debe marcarse como dudoso.");
+
+    // Sin uno de los dos paises no hay contradiccion que declarar, solo ignorancia.
+    var pending = StationFacts.Empty with { Callsign = "XHPQ-FM" };
+    if (pending.SiteContradictsCallsign)
+        throw new InvalidOperationException("Sin sitio geocodificado no puede haber contradiccion.");
+    var unknown = StationFacts.Empty with { SiteCountry = "US" };
+    if (unknown.SiteContradictsCallsign)
+        throw new InvalidOperationException("Sin indicativo no puede haber contradiccion.");
+
+    Console.WriteLine("[OK] Un emplazamiento que contradice al indicativo se marca en vez de nombrarse.");
+
+    static void ExpectCountry(string callsign, string expected)
+    {
+        var actual = StationFacts.CountryFromCallsign(callsign);
+        if (actual != expected)
+            throw new InvalidOperationException($"Pais de '{callsign}': se esperaba '{expected}', se obtuvo '{actual}'.");
     }
 }
 

@@ -133,6 +133,13 @@ signal, and its four fields come from three different places:
   community of licence is used in the cell if the geocoder cannot name the site.
 - **Power** is the licensed ERP.
 
+Not every station tells the truth about itself. The identity block in SIS — country, FCC
+facility ID, transmitter coordinates — is configured once at installation and is regularly
+left at whatever the exciter shipped with, while the call sign is kept correct because it is
+what listeners read. So the call sign decides which country a station belongs to, and when
+the coordinates geocode to a different country the cell shows them raw with a question mark
+instead of naming a town the station does not transmit from.
+
 Power and the community of licence are looked up in the FCC's public
 [FM Query](https://www.fcc.gov/media/radio/fm-query) service, keyed by the facility ID the station
 transmits. The transmitter town comes from the
