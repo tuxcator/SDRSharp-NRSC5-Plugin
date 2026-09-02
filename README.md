@@ -54,6 +54,8 @@ Captured with an Airspy HF+ Discovery at 912 ksps. The `Device SN` field is mask
 - Subchannels HD1 to HD8, with a Previous/Next selector that steps only through the ones the station
   actually broadcasts, discovered from the SIG table.
 - Optional surround effect that widens the HD stereo image.
+- Station information: slogan, PI code, location and power, with the licensee, class, HAAT and
+  transmitter coordinates in the tooltip.
 - Responsive layout with no inner scrolling: the square artwork and the metric cards scale with the
   panel.
 
@@ -115,6 +117,28 @@ falling back to analog, and how long the silent gap is when you change subchanne
 mixed with a copy delayed by 14 ms, and bass below 250 Hz stays centred so the mix does not hollow
 out or cancel on a mono speaker. It only touches the codec audio, never SDR#'s analog path, and the
 centre level is left alone so it reads as width rather than as volume.
+
+**Station information.** The row under the song details identifies the station rather than the
+signal, and its four fields come from three different places:
+
+- **Slogan** is broadcast by the station in its SIS frames, so it appears as soon as the decoder
+  locks. If the station sends no slogan, its SIS message is shown instead.
+- **PI code** is derived from the call sign with the RBDS rule, which is what an RDS receiver
+  displays. HD Radio does not transmit it and no database publishes it. Three-letter call signs are
+  an exception table in the standard rather than a formula, and Canadian and Mexican PI codes are
+  assigned rather than derived, so those stay blank instead of being guessed.
+- **Location** is the community of licence once the FCC answers. Until then the transmitter
+  coordinates from SIS are shown, because they arrive seconds earlier.
+- **Power** is the licensed ERP.
+
+Location and power are looked up in the FCC's public [FM Query](https://www.fcc.gov/media/radio/fm-query)
+service, keyed by the facility ID the station transmits. That is public-domain government data and
+needs no account. Answers are cached on disk for 30 days under
+`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, the query runs off the decoder thread, and if it
+fails only those two fields stay blank. Stations licensed outside the US are not queried.
+
+The plugin does not read `radio-locator.com` or `fmlist.org`. The pages holding this data are
+`Disallow`ed to every user agent in both sites' `robots.txt`, and fmlist has no unauthenticated API.
 
 ## Build from source
 

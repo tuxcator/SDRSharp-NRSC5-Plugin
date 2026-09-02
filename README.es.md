@@ -55,6 +55,8 @@ Capturado con un Airspy HF+ Discovery a 912 ksps. El campo `Device SN` está enm
 - Subcanales HD1 a HD8, con selector Previous/Next que recorre únicamente los que la emisora
   transmite, descubiertos por la tabla SIG.
 - Efecto envolvente opcional que ensancha la imagen estéreo del audio HD.
+- Información de la emisora: eslogan, código PI, ubicación y potencia, con el concesionario, la
+  clase, el HAAT y las coordenadas del transmisor en el tooltip.
 - Diseño responsivo sin scroll interno: el Artwork cuadrado y las métricas se ajustan al tamaño del
   panel.
 
@@ -119,6 +121,30 @@ le suma una copia retrasada 14 ms, y mantiene los graves por debajo de 250 Hz al
 mezcla no se vacíe ni se cancele en un altavoz mono. Solo toca el audio del códec, nunca la ruta
 analógica de SDR#, y no altera el nivel del centro, así que se percibe como anchura y no como
 volumen.
+
+**Información de la emisora.** La fila bajo los datos de la canción identifica a la emisora, no a la
+señal, y sus cuatro campos vienen de tres sitios distintos:
+
+- El **eslogan** lo transmite la propia emisora en sus tramas SIS, así que aparece en cuanto el
+  decodificador sincroniza. Si la emisora no envía eslogan, se muestra su mensaje SIS.
+- El **código PI** se deriva del indicativo con la regla RBDS, que es lo que muestra un receptor
+  RDS. HD Radio no lo transmite y ninguna base de datos lo publica. Los indicativos de tres letras
+  son una tabla de excepciones del estándar en vez de una fórmula, y los códigos PI de Canadá y
+  México se asignan en lugar de derivarse, así que esos quedan en blanco en vez de inventarse.
+- La **ubicación** es la ciudad de licencia una vez responde la FCC. Hasta entonces se muestran las
+  coordenadas del transmisor que llegan por SIS, porque aparecen unos segundos antes.
+- La **potencia** es la ERP licenciada.
+
+La ubicación y la potencia se consultan en el servicio público [FM Query](https://www.fcc.gov/media/radio/fm-query)
+de la FCC, usando el identificador de instalación que la emisora transmite. Son datos de dominio
+público del gobierno y no necesitan cuenta. Las respuestas se guardan en disco durante 30 días en
+`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, la consulta corre fuera del hilo del decodificador
+y, si falla, solo esos dos campos quedan vacíos. Las emisoras licenciadas fuera de Estados Unidos no
+se consultan.
+
+El plugin no lee `radio-locator.com` ni `fmlist.org`. Las páginas con estos datos están marcadas como
+`Disallow` para todo agente en el `robots.txt` de ambos sitios, y fmlist no tiene API sin
+autenticación.
 
 ## Compilar
 

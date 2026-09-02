@@ -7,6 +7,31 @@ digitales en paralelo al audio analógico.
 
 *[English version](README.md)*
 
+<p align="center">
+  <a href="https://paypal.me/EmmanuelM183">
+    <img src="https://img.shields.io/badge/Donar-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white"
+         height="60" alt="Donar con PayPal">
+  </a>
+</p>
+
+## En funcionamiento
+
+![Recorrido por HD1, HD2 y HD3 en 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
+
+Recorrido por los tres subcanales de una emisora en 103.7 MHz: el Artwork, los metadatos y todo el
+análisis de señal siguen al subcanal seleccionado, y el audio no vuelve al analógico entre uno y
+otro. [Ver la captura completa de 50 segundos con audio](docs/media/demo-hd1-hd2-hd3.mp4).
+
+### Capturas de pantalla
+
+La misma emisora en cada uno de sus tres subcanales. Pulse cualquier imagen para verla completa.
+
+| HD1 · La Ke Buena | HD2 · LA AW | HD3 · Milenio Radio |
+|---|---|---|
+| [![HD1](docs/media/screenshot-hd1.png)](docs/media/screenshot-hd1.png) | [![HD2](docs/media/screenshot-hd2.png)](docs/media/screenshot-hd2.png) | [![HD3](docs/media/screenshot-hd3.png)](docs/media/screenshot-hd3.png) |
+
+Capturado con un Airspy HF+ Discovery a 912 ksps. El campo `Device SN` está enmascarado a propósito.
+
 ## Documentación
 
 - [Guía de instalación completa](docs/INSTALACION.md)
@@ -30,6 +55,8 @@ digitales en paralelo al audio analógico.
 - Subcanales HD1 a HD8, con selector Previous/Next que recorre únicamente los que la emisora
   transmite, descubiertos por la tabla SIG.
 - Efecto envolvente opcional que ensancha la imagen estéreo del audio HD.
+- Información de la emisora: eslogan, código PI, ubicación y potencia, con el concesionario, la
+  clase, el HAAT y las coordenadas del transmisor en el tooltip.
 - Diseño responsivo sin scroll interno: el Artwork cuadrado y las métricas se ajustan al tamaño del
   panel.
 
@@ -95,6 +122,30 @@ mezcla no se vacíe ni se cancele en un altavoz mono. Solo toca el audio del có
 analógica de SDR#, y no altera el nivel del centro, así que se percibe como anchura y no como
 volumen.
 
+**Información de la emisora.** La fila bajo los datos de la canción identifica a la emisora, no a la
+señal, y sus cuatro campos vienen de tres sitios distintos:
+
+- El **eslogan** lo transmite la propia emisora en sus tramas SIS, así que aparece en cuanto el
+  decodificador sincroniza. Si la emisora no envía eslogan, se muestra su mensaje SIS.
+- El **código PI** se deriva del indicativo con la regla RBDS, que es lo que muestra un receptor
+  RDS. HD Radio no lo transmite y ninguna base de datos lo publica. Los indicativos de tres letras
+  son una tabla de excepciones del estándar en vez de una fórmula, y los códigos PI de Canadá y
+  México se asignan en lugar de derivarse, así que esos quedan en blanco en vez de inventarse.
+- La **ubicación** es la ciudad de licencia una vez responde la FCC. Hasta entonces se muestran las
+  coordenadas del transmisor que llegan por SIS, porque aparecen unos segundos antes.
+- La **potencia** es la ERP licenciada.
+
+La ubicación y la potencia se consultan en el servicio público [FM Query](https://www.fcc.gov/media/radio/fm-query)
+de la FCC, usando el identificador de instalación que la emisora transmite. Son datos de dominio
+público del gobierno y no necesitan cuenta. Las respuestas se guardan en disco durante 30 días en
+`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, la consulta corre fuera del hilo del decodificador
+y, si falla, solo esos dos campos quedan vacíos. Las emisoras licenciadas fuera de Estados Unidos no
+se consultan.
+
+El plugin no lee `radio-locator.com` ni `fmlist.org`. Las páginas con estos datos están marcadas como
+`Disallow` para todo agente en el `robots.txt` de ambos sitios, y fmlist no tiene API sin
+autenticación.
+
 ## Compilar
 
 ```bat
@@ -138,3 +189,13 @@ restablecer o reinstalar Windows.
 
 El código del plugin se distribuye bajo GPL-3.0-or-later para ser compatible con nrsc5. Los
 ensamblados del SDK de SDR# se descargan desde Airspy y no deben publicarse dentro del repositorio.
+
+## Apoyo
+
+Este plugin es software libre y se desarrolla en tiempo libre. Si le resulta útil, una donación es
+una forma de agradecerlo: es totalmente opcional y no otorga privilegios, soporte prioritario ni
+influencia sobre el desarrollo.
+
+[![Donar con PayPal](https://img.shields.io/badge/PayPal-donar-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
+<https://paypal.me/EmmanuelM183>

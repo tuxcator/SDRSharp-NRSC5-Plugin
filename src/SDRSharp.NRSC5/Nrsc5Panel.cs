@@ -23,12 +23,14 @@ internal static class PanelFonts
     internal static readonly Font ChannelButton = new("Segoe UI Semibold", 8.5F, FontStyle.Bold);
     internal static readonly Font SmallButton = new("Segoe UI", 8F);
     internal static readonly Font Placeholder = new("Segoe UI Semibold", 16F, FontStyle.Bold);
+    internal static readonly Font Slogan = new("Segoe UI", 9.5F, FontStyle.Italic);
+    internal static readonly Font InfoValue = new("Segoe UI Semibold", 9F, FontStyle.Bold);
+    internal static readonly Font InfoCaption = new("Segoe UI", 7F, FontStyle.Bold);
 }
 
 internal sealed class Nrsc5Panel : UserControl
 {
-    /// <summary>Build shown in the header byline, so a tester can tell versions apart.</summary>
-    internal const string DevelopmentVersion = "3.2";
+    internal const string DevelopmentVersion = PluginInfo.DevelopmentVersion;
 
     private static readonly Color Background = Color.FromArgb(10, 15, 21);
     private static readonly Color Card = Color.FromArgb(21, 29, 38);
@@ -67,6 +69,10 @@ internal sealed class Nrsc5Panel : UserControl
     private readonly Label _title = NewCenterLabel(PanelFonts.Title, Color.White);
     private readonly Label _artistAlbum = NewCenterLabel(PanelFonts.Detail, Muted);
     private readonly Label _iqInfo = NewCenterLabel(PanelFonts.Small, Muted);
+    private readonly Label _slogan = NewCenterLabel(PanelFonts.Slogan, Secondary);
+    private readonly InfoCard _piCode = new("PI CODE", Secondary);
+    private readonly InfoCard _location = new("LOCATION", Primary);
+    private readonly InfoCard _erp = new("POWER", Color.FromArgb(255, 184, 77));
     private readonly PictureBox _artwork = new()
     {
         SizeMode = PictureBoxSizeMode.Zoom,
@@ -106,7 +112,7 @@ internal sealed class Nrsc5Panel : UserControl
             Dock = DockStyle.Fill,
             AutoSize = false,
             ColumnCount = 1,
-            RowCount = 12,
+            RowCount = 14,
             GrowStyle = TableLayoutPanelGrowStyle.FixedSize,
             BackColor = Background,
             Margin = Padding.Empty,
@@ -123,6 +129,8 @@ internal sealed class Nrsc5Panel : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 17));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 37));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
@@ -136,12 +144,14 @@ internal sealed class Nrsc5Panel : UserControl
         root.Controls.Add(_station, 0, 3);
         root.Controls.Add(_title, 0, 4);
         root.Controls.Add(_artistAlbum, 0, 5);
-        root.Controls.Add(BuildChannelSelector(), 0, 6);
-        root.Controls.Add(BuildSectionLabel("SIGNAL ANALYSIS"), 0, 7);
-        root.Controls.Add(BuildMetrics(), 0, 8);
-        root.Controls.Add(_iqInfo, 0, 9);
-        root.Controls.Add(_bufferState, 0, 10);
-        root.Controls.Add(BuildControls(), 0, 11);
+        root.Controls.Add(_slogan, 0, 6);
+        root.Controls.Add(BuildStationInfo(), 0, 7);
+        root.Controls.Add(BuildChannelSelector(), 0, 8);
+        root.Controls.Add(BuildSectionLabel("SIGNAL ANALYSIS"), 0, 9);
+        root.Controls.Add(BuildMetrics(), 0, 10);
+        root.Controls.Add(_iqInfo, 0, 11);
+        root.Controls.Add(_bufferState, 0, 12);
+        root.Controls.Add(BuildControls(), 0, 13);
         Controls.Add(root);
 
         _artwork.Paint += ArtworkOnPaint;
@@ -164,7 +174,9 @@ internal sealed class Nrsc5Panel : UserControl
         _engine.BufferingEnabled = _useBuffer.Checked;
         _engine.BufferSeconds = (double)_bufferSeconds.Value;
         _engine.StatusChanged += EngineOnStatusChanged;
+        _engine.StationFactsChanged += EngineOnStationFactsChanged;
         EngineOnStatusChanged(_engine.Status);
+        EngineOnStationFactsChanged(_engine.Facts);
     }
 
     protected override void Dispose(bool disposing)
@@ -172,6 +184,7 @@ internal sealed class Nrsc5Panel : UserControl
         if (disposing)
         {
             _engine.StatusChanged -= EngineOnStatusChanged;
+            _engine.StationFactsChanged -= EngineOnStationFactsChanged;
             _tips.Dispose();
             var image = _artwork.Image;
             _artwork.Image = null;
@@ -222,6 +235,90 @@ internal sealed class Nrsc5Panel : UserControl
             (host.ClientSize.Height - side) / 2,
             side,
             side);
+    }
+
+    /// <summary>
+    /// Who the station is, as opposed to how well it is being received. The three cells
+    /// are kept on one row because every absolute pixel here comes out of the Artwork.
+    /// The detail that does not fit - licensee, class, HAAT, transmitter site - lives in
+    /// the tooltip rather than costing another row.
+    /// </summary>
+    private Control BuildStationInfo()
+    {
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Background,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        // La ciudad es el campo que mas espacio necesita: el PI code y la potencia son
+        // siempre cortos, asi que se les da lo justo y el resto va a la ubicacion.
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 26));
+        grid.Controls.Add(_piCode, 0, 0);
+        grid.Controls.Add(_location, 1, 0);
+        grid.Controls.Add(_erp, 2, 0);
+
+        _tips.SetToolTip(_slogan, "Slogan as the station broadcasts it in its SIS frames.");
+        _tips.SetToolTip(_piCode, "RDS PI code in hexadecimal, derived from the call sign. HD Radio does not transmit it.");
+        return grid;
+    }
+
+    private void EngineOnStationFactsChanged(StationFacts facts)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => EngineOnStationFactsChanged(facts)));
+            return;
+        }
+
+        _slogan.Text = facts.Slogan.Length > 0 ? facts.Slogan : facts.Message;
+        _piCode.SetValue(facts.PiCode is { } pi ? pi.ToString("X4") : "--");
+        _location.SetValue(DescribeLocation(facts));
+        _erp.SetValue(facts.ErpKw > 0 ? $"{facts.ErpKw:0.##} kW" : "--");
+
+        var details = DescribeStation(facts);
+        _tips.SetToolTip(_location, details);
+        _tips.SetToolTip(_erp, details);
+    }
+
+    /// <summary>
+    /// Community of licence once the FCC answers. Until then the transmitter site from
+    /// SIS is shown, because it arrives seconds earlier and is the more useful of the
+    /// two for anyone chasing the signal.
+    /// </summary>
+    private static string DescribeLocation(StationFacts facts)
+    {
+        if (facts.Place.Length > 0) return facts.Place;
+        if (facts.HasLocation) return $"{Math.Abs(facts.Latitude):0.000}{(facts.Latitude < 0 ? "S" : "N")}  {Math.Abs(facts.Longitude):0.000}{(facts.Longitude < 0 ? "W" : "E")}";
+        return facts.Lookup == StationLookupState.Pending ? "Looking up..." : "--";
+    }
+
+    private static string DescribeStation(StationFacts facts)
+    {
+        var lines = new List<string>(7);
+        if (facts.Callsign.Length > 0) lines.Add($"Call sign: {facts.Callsign}");
+        if (facts.FacilityId > 0) lines.Add($"FCC facility ID: {facts.FacilityId}");
+        if (facts.Licensee.Length > 0) lines.Add($"Licensee: {facts.Licensee}");
+        if (facts.StationClass.Length > 0) lines.Add($"Class: {facts.StationClass}");
+        if (facts.HaatMeters > 0) lines.Add($"HAAT: {facts.HaatMeters:0.#} m");
+        if (facts.HasLocation)
+            lines.Add($"Transmitter: {facts.Latitude:0.0000}, {facts.Longitude:0.0000} at {facts.Altitude} m");
+        lines.Add(facts.Lookup switch
+        {
+            StationLookupState.Pending => "Querying the FCC licence database...",
+            StationLookupState.Resolved => "Licence data: FCC FM Query. Slogan and site: SIS.",
+            StationLookupState.NotFound => "This facility ID is not in the FCC FM database.",
+            StationLookupState.Failed => "The FCC lookup failed; retrying on the next tune.",
+            StationLookupState.Unsupported => $"Licensed outside the US ({facts.CountryCode}); no FCC record.",
+            _ => "Waiting for the station to identify itself."
+        });
+        return string.Join(Environment.NewLine, lines);
     }
 
     private Control BuildMetrics()
@@ -546,6 +643,62 @@ internal sealed class Nrsc5Panel : UserControl
         BackColor = Card,
         Margin = new Padding(3, 6, 1, 0)
     };
+}
+
+/// <summary>
+/// A shorter <see cref="MetricCard"/>: same caption-over-value shape, sized to fit three
+/// across a single 37 px row instead of half of a metrics cell.
+/// </summary>
+internal sealed class InfoCard : Panel
+{
+    private readonly SingleLineLabel _value;
+
+    public InfoCard(string caption, Color accent)
+    {
+        Dock = DockStyle.Fill;
+        Margin = new Padding(3, 0, 3, 0);
+        Padding = new Padding(4, 1, 2, 1);
+        BackColor = Color.FromArgb(21, 29, 38);
+        _value = new SingleLineLabel
+        {
+            Text = "--",
+            Dock = DockStyle.Fill,
+            ForeColor = accent,
+            Font = PanelFonts.InfoValue
+        };
+        Controls.Add(_value);
+        Controls.Add(new Label
+        {
+            Text = caption,
+            Dock = DockStyle.Top,
+            Height = 14,
+            ForeColor = Color.FromArgb(145, 160, 178),
+            Font = PanelFonts.InfoCaption
+        });
+    }
+
+    public void SetValue(string value) => _value.Text = value.Length == 0 ? "--" : value;
+
+    /// <summary>
+    /// A plain Label wraps, and in a 45 px cell that turns "100 kW" into "100" over a "kW"
+    /// clipped by the row height. These values are always one line, so they are drawn as
+    /// one line and cut with an ellipsis when a long city name does not fit.
+    /// </summary>
+    private sealed class SingleLineLabel : Label
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor,
+                TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis |
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
+        }
+
+        protected override void OnTextChanged(EventArgs e)
+        {
+            base.OnTextChanged(e);
+            Invalidate();
+        }
+    }
 }
 
 internal sealed class MetricCard : Panel

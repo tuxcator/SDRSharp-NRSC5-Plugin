@@ -13,6 +13,9 @@ $required = @(
     'src\SDRSharp.NRSC5\Nrsc5Native.cs',
     'src\SDRSharp.NRSC5\Nrsc5Panel.cs',
     'src\SDRSharp.NRSC5\PolyphaseResampler.cs',
+    'src\SDRSharp.NRSC5\PluginInfo.cs',
+    'src\SDRSharp.NRSC5\StationFacts.cs',
+    'src\SDRSharp.NRSC5\FccStationDirectory.cs',
     'scripts\Get-Dependencies.ps1',
     'scripts\Build.ps1',
     'scripts\Install.ps1'
@@ -25,8 +28,24 @@ $source = (Get-ChildItem -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5') -Fi
 foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5_pipe_samples_cf32','ProcessAudio','SelectedProgram','Nrsc5Event.Lot','ReceiveLot','BitrateKbps','SignalProbeSamples','SyncLossGraceMs','ConfirmSyncLoss','_lastDigitalTicks','remainingMs','_lastFrequency','LayoutArtworkSquare','DecodeArtwork','DbmCalibrationOffset','BuildChannelSelector','PREVIOUS','NEXT  ▶','Synchronized HD','AutoScroll = false','RowStyle(SizeType.Percent','Dock = DockStyle.Fill',
     'PolyphaseResampler','MixToBaseband','BufferSeconds','BufferingEnabled','EnsureCapacityFrames',
     'Nrsc5Layout','Nrsc5Mime.StationLogo','RefreshArtwork','_stationLogoByProgram','_latestArtByProgram',
-    'ReceiveSig','MarkProgramAvailable','StepProgram','ProgramMask','PanelFonts') {
+    'ReceiveSig','MarkProgramAvailable','StepProgram','ProgramMask','PanelFonts',
+    'Nrsc5Event.StationSlogan','Nrsc5Event.StationId','Nrsc5Event.StationLocation',
+    'StationFactsChanged','ResetStationFacts','BeginFccLookup','PiCodeFor','InfoCard',
+    'PI CODE','LOCATION','POWER') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
+}
+
+# Las paginas de radio-locator.com y fmlist.org que traen eslogan, potencia y ubicacion
+# estan prohibidas para clientes automaticos en sus robots.txt, asi que el plugin no las
+# consulta: los datos salen de SIS y de la base publica de la FCC.
+foreach ($forbidden in 'radio-locator','fmlist.org','cgi-bin/pat') {
+    if ($source -match [regex]::Escape($forbidden)) {
+        throw "El plugin no debe consultar ${forbidden}: su robots.txt lo prohibe."
+    }
+}
+# La consulta a la FCC nunca puede bloquear el hilo del decodificador ni el de la interfaz.
+if ($source -match '\.LookupAsync\([^)]*\)\.(Result|GetAwaiter)') {
+    throw 'La consulta a la FCC debe esperarse con await, nunca bloqueando el hilo.'
 }
 
 if ($source -match 'AutoScroll\s*=\s*true' -or $source -match 'MinimumSize\s*=\s*new Size\(370, 700\)') {

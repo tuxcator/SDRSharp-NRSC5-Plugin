@@ -60,6 +60,8 @@ internal sealed class Nrsc5Engine : IDisposable
     private readonly object _statusGate = new();
     private readonly object _artworkGate = new();
     private readonly object _bitrateGate = new();
+    private readonly object _factsGate = new();
+    private readonly FccStationDirectory _fccDirectory = new();
     private readonly PcmRingBuffer _audio = new((int)(Nrsc5Native.AudioSampleRate * 3));
     private readonly PolyphaseResampler _resampler = new();
     private readonly SurroundProcessor _surround = new();
@@ -104,6 +106,9 @@ internal sealed class Nrsc5Engine : IDisposable
     private long _bitrateBytes;
     private long _bitrateStartedTicks = Stopwatch.GetTimestamp();
     private Nrsc5Status _status = Nrsc5Status.Idle;
+    private StationFacts _facts = StationFacts.Empty;
+    private int _lookedUpFacilityId;
+    private CancellationTokenSource? _lookupCancellation;
 
     private readonly record struct CachedImage(byte[] Bytes, uint Mime, int Program);
 
@@ -121,9 +126,21 @@ internal sealed class Nrsc5Engine : IDisposable
 
     public event Action<Nrsc5Status>? StatusChanged;
 
+    /// <summary>
+    /// Raised only when the station's own identity changes, which is a handful of times
+    /// per tune. It is deliberately not folded into <see cref="StatusChanged"/>, which
+    /// fires about ten times a second to carry the signal meters.
+    /// </summary>
+    public event Action<StationFacts>? StationFactsChanged;
+
     public Nrsc5Status Status
     {
         get { lock (_statusGate) return _status; }
+    }
+
+    public StationFacts Facts
+    {
+        get { lock (_factsGate) return _facts; }
     }
 
     public bool Enabled
@@ -286,7 +303,12 @@ internal sealed class Nrsc5Engine : IDisposable
         // the analog path plays. Fine tuning the same station keeps the current subchannel.
         var previous = Interlocked.Exchange(ref _lastTunedFrequency, frequency);
         if (previous == 0 || Math.Abs(frequency - previous) > StationStepHz)
+        {
             Volatile.Write(ref _selectedProgram, 0);
+            // Fine tuning keeps the station facts on screen: SIS repeats slowly, and
+            // blanking them on every nudge of the dial would make the panel flicker.
+            ResetStationFacts();
+        }
 
         CancelPendingSyncLoss();
         ResetAudio();
@@ -453,6 +475,13 @@ internal sealed class Nrsc5Engine : IDisposable
         Stop("Closed");
         _retuneTimer.Dispose();
         _syncLossTimer.Dispose();
+        lock (_factsGate)
+        {
+            _lookupCancellation?.Cancel();
+            _lookupCancellation?.Dispose();
+            _lookupCancellation = null;
+        }
+        _fccDirectory.Dispose();
     }
 
     private void Start()
@@ -605,7 +634,35 @@ internal sealed class Nrsc5Engine : IDisposable
                     break;
                 case Nrsc5Event.StationName:
                     var station = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationNameName));
-                    if (!string.IsNullOrWhiteSpace(station)) UpdateStatus(s => s with { Station = station });
+                    if (!string.IsNullOrWhiteSpace(station))
+                    {
+                        UpdateStatus(s => s with { Station = station });
+                        UpdateFacts(f => f with { Callsign = station.Trim() });
+                    }
+                    break;
+                case Nrsc5Event.StationSlogan:
+                    var slogan = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationSloganSlogan));
+                    if (!string.IsNullOrWhiteSpace(slogan)) UpdateFacts(f => f with { Slogan = slogan.Trim() });
+                    break;
+                case Nrsc5Event.StationMessage:
+                    var stationMessage = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationMessageMessage));
+                    if (!string.IsNullOrWhiteSpace(stationMessage))
+                        UpdateFacts(f => f with { Message = stationMessage.Trim() });
+                    break;
+                case Nrsc5Event.StationId:
+                    ReceiveStationId(union);
+                    break;
+                case Nrsc5Event.StationLocation:
+                    var latitude = ReadFloat(union, Nrsc5Layout.StationLocationLatitude);
+                    var longitude = ReadFloat(union, Nrsc5Layout.StationLocationLongitude);
+                    var altitude = Marshal.ReadInt32(union, Nrsc5Layout.StationLocationAltitude);
+                    UpdateFacts(f => f with
+                    {
+                        Latitude = latitude,
+                        Longitude = longitude,
+                        Altitude = altitude,
+                        HasLocation = true
+                    });
                     break;
             }
         }
@@ -817,6 +874,116 @@ internal sealed class Nrsc5Engine : IDisposable
     private static bool LooksLikeImage(byte[] data) =>
         data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF ||
         data.Length >= 8 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47;
+
+    /// <summary>
+    /// The station ID frame carries the country and the FCC facility ID, which is the key
+    /// the licence lookup needs. It repeats every few seconds, so the lookup guards
+    /// against firing again for a facility it has already asked about.
+    /// </summary>
+    private void ReceiveStationId(IntPtr union)
+    {
+        var country = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.StationIdCountryCode)).Trim();
+        var facilityId = Marshal.ReadInt32(union, Nrsc5Layout.StationIdFacilityId);
+        UpdateFacts(f => f with { CountryCode = country, FacilityId = facilityId });
+        BeginFccLookup(facilityId, country);
+    }
+
+    /// <summary>
+    /// Fills in what the station does not broadcast - community of licence, ERP, HAAT -
+    /// from the FCC's public database. It runs off the decoder thread, and failing only
+    /// costs those three fields: everything SIS carries is already on screen.
+    /// </summary>
+    private void BeginFccLookup(int facilityId, string countryCode)
+    {
+        if (facilityId <= 0) return;
+
+        // The FCC only licenses US stations. A Canadian or Mexican HD signal carries a
+        // facility ID that means nothing to this database, so it is not queried at all.
+        if (countryCode.Length > 0 && !countryCode.Equals("US", StringComparison.OrdinalIgnoreCase))
+        {
+            UpdateFacts(f => f with { Lookup = StationLookupState.Unsupported });
+            return;
+        }
+
+        CancellationToken token;
+        lock (_factsGate)
+        {
+            if (_lookedUpFacilityId == facilityId) return;
+            _lookedUpFacilityId = facilityId;
+            _lookupCancellation?.Cancel();
+            _lookupCancellation?.Dispose();
+            _lookupCancellation = new CancellationTokenSource();
+            token = _lookupCancellation.Token;
+        }
+
+        UpdateFacts(f => f with { Lookup = StationLookupState.Pending });
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                ApplyFccRecord(facilityId, await _fccDirectory.LookupAsync(facilityId, token).ConfigureAwait(false));
+            }
+            catch (OperationCanceledException)
+            {
+                // Retuned before the answer arrived; the new station starts its own lookup.
+            }
+            catch
+            {
+                ApplyLookupState(facilityId, StationLookupState.Failed);
+            }
+        }, CancellationToken.None);
+    }
+
+    private void ApplyFccRecord(int facilityId, FccRecord? record)
+    {
+        if (record is null)
+        {
+            ApplyLookupState(facilityId, StationLookupState.NotFound);
+            return;
+        }
+
+        UpdateFacts(f => f.FacilityId != facilityId
+            ? f
+            : f with
+            {
+                City = record.City,
+                State = record.State,
+                Licensee = record.Licensee,
+                StationClass = record.StationClass,
+                ErpKw = record.ErpKw,
+                HaatMeters = record.HaatMeters,
+                Lookup = StationLookupState.Resolved
+            });
+    }
+
+    /// <summary>Ignored once the dial has moved on, so a late answer cannot land on a new station.</summary>
+    private void ApplyLookupState(int facilityId, StationLookupState state) =>
+        UpdateFacts(f => f.FacilityId == facilityId ? f with { Lookup = state } : f);
+
+    private void ResetStationFacts()
+    {
+        lock (_factsGate)
+        {
+            _lookedUpFacilityId = 0;
+            _lookupCancellation?.Cancel();
+            _lookupCancellation?.Dispose();
+            _lookupCancellation = null;
+        }
+        UpdateFacts(_ => StationFacts.Empty);
+    }
+
+    private void UpdateFacts(Func<StationFacts, StationFacts> update)
+    {
+        StationFacts next;
+        lock (_factsGate)
+        {
+            next = update(_facts);
+            if (next == _facts) return;
+            _facts = next;
+        }
+        StationFactsChanged?.Invoke(next);
+    }
 
     private void UpdateStatus(Func<Nrsc5Status, Nrsc5Status> update)
     {

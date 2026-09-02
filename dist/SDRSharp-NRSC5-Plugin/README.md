@@ -7,6 +7,31 @@ the analog audio.
 
 *[Versión en español](README.es.md)*
 
+<p align="center">
+  <a href="https://paypal.me/EmmanuelM183">
+    <img src="https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white"
+         height="60" alt="Donate with PayPal">
+  </a>
+</p>
+
+## See it running
+
+![Stepping through HD1, HD2 and HD3 on 103.7 MHz](docs/media/demo-hd1-hd2-hd3.gif)
+
+Stepping through the three subchannels of one station on 103.7 MHz: the artwork, the metadata and
+the whole signal analysis follow the selected subchannel, and the audio never drops back to analog
+in between. [Watch the full 50-second capture with audio](docs/media/demo-hd1-hd2-hd3.mp4).
+
+### Screenshots
+
+The same station on each of its three subchannels. Click any image for the full resolution.
+
+| HD1 · La Ke Buena | HD2 · LA AW | HD3 · Milenio Radio |
+|---|---|---|
+| [![HD1](docs/media/screenshot-hd1.png)](docs/media/screenshot-hd1.png) | [![HD2](docs/media/screenshot-hd2.png)](docs/media/screenshot-hd2.png) | [![HD3](docs/media/screenshot-hd3.png)](docs/media/screenshot-hd3.png) |
+
+Captured with an Airspy HF+ Discovery at 912 ksps. The `Device SN` field is masked on purpose.
+
 ## Documentation
 
 - [Full installation guide](docs/INSTALLATION.md)
@@ -29,6 +54,8 @@ the analog audio.
 - Subchannels HD1 to HD8, with a Previous/Next selector that steps only through the ones the station
   actually broadcasts, discovered from the SIG table.
 - Optional surround effect that widens the HD stereo image.
+- Station information: slogan, PI code, location and power, with the licensee, class, HAAT and
+  transmitter coordinates in the tooltip.
 - Responsive layout with no inner scrolling: the square artwork and the metric cards scale with the
   panel.
 
@@ -91,6 +118,28 @@ mixed with a copy delayed by 14 ms, and bass below 250 Hz stays centred so the m
 out or cancel on a mono speaker. It only touches the codec audio, never SDR#'s analog path, and the
 centre level is left alone so it reads as width rather than as volume.
 
+**Station information.** The row under the song details identifies the station rather than the
+signal, and its four fields come from three different places:
+
+- **Slogan** is broadcast by the station in its SIS frames, so it appears as soon as the decoder
+  locks. If the station sends no slogan, its SIS message is shown instead.
+- **PI code** is derived from the call sign with the RBDS rule, which is what an RDS receiver
+  displays. HD Radio does not transmit it and no database publishes it. Three-letter call signs are
+  an exception table in the standard rather than a formula, and Canadian and Mexican PI codes are
+  assigned rather than derived, so those stay blank instead of being guessed.
+- **Location** is the community of licence once the FCC answers. Until then the transmitter
+  coordinates from SIS are shown, because they arrive seconds earlier.
+- **Power** is the licensed ERP.
+
+Location and power are looked up in the FCC's public [FM Query](https://www.fcc.gov/media/radio/fm-query)
+service, keyed by the facility ID the station transmits. That is public-domain government data and
+needs no account. Answers are cached on disk for 30 days under
+`%LOCALAPPDATA%\SDRSharp.NRSC5\fcc-fm-cache.json`, the query runs off the decoder thread, and if it
+fails only those two fields stay blank. Stations licensed outside the US are not queried.
+
+The plugin does not read `radio-locator.com` or `fmlist.org`. The pages holding this data are
+`Disallow`ed to every user agent in both sites' `robots.txt`, and fmlist has no unauthenticated API.
+
 ## Build from source
 
 ```bat
@@ -133,3 +182,13 @@ states it cannot be turned back on without resetting or reinstalling Windows.
 
 The plugin code is distributed under GPL-3.0-or-later for compatibility with nrsc5. The SDR# SDK
 assemblies are downloaded from Airspy and must not be republished inside this repository.
+
+## Support
+
+This plugin is free software and is developed in my spare time. If it is useful to you, a donation
+is a welcome way to say thanks — it is entirely optional and grants no privileges, priority support,
+or influence over the roadmap.
+
+[![Donate with PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://paypal.me/EmmanuelM183)
+
+<https://paypal.me/EmmanuelM183>

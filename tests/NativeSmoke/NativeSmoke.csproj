@@ -10,5 +10,9 @@
   <ItemGroup>
     <!-- Compartido con el plugin para verificar los offsets del evento nativo. -->
     <Compile Include="..\..\src\SDRSharp.NRSC5\Nrsc5Native.cs" />
+    <!-- El PI code y el parseo de la FCC son logica pura: se prueban sin SDR# ni WinForms. -->
+    <Compile Include="..\..\src\SDRSharp.NRSC5\PluginInfo.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\StationFacts.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\FccStationDirectory.cs" />
   </ItemGroup>
 </Project>

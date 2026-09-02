@@ -2,7 +2,30 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
-## Unreleased — development build 3.2
+## Unreleased — development build 3.3
+
+- New **station information** row under the song details, showing the station's **slogan**,
+  its **PI code**, its **location** and its **power**.
+- The slogan, the call sign, the FCC facility ID and the transmitter site now come from the
+  SIS frames the station itself broadcasts. libnrsc5 was already delivering those events;
+  the plugin was discarding all of them except the station name.
+- The community of licence, the ERP and the HAAT come from the FCC's public FM Query service,
+  looked up by the facility ID the station transmits. The answers are cached in memory and on
+  disk for 30 days, since a listener sweeping the band revisits the same stations constantly
+  and a licence changes at most a few times a year. The lookup runs off the decoder thread and
+  failing costs only those three fields: everything from SIS is already on screen. Stations
+  licensed outside the US are not queried at all.
+- The PI code is derived from the call sign with the RBDS rule, which is what an RDS receiver
+  would display: HD Radio does not transmit it and no database publishes it. Three-letter call
+  signs are an exception table in the standard rather than a formula, and Canadian and Mexican
+  PI codes are assigned rather than derived, so those are left blank instead of guessed.
+- The licensee, the class, the HAAT and the transmitter coordinates are in the tooltip, so the
+  new fields cost the artwork a single 37 px row.
+- `radio-locator.com` and `fmlist.org` are deliberately **not** queried. The pages that carry
+  slogan, power and location are `Disallow`ed to every user agent in their `robots.txt`
+  (`/info` and `/cgi-bin/pat` on radio-locator, `/export/` and `/demoapi/` on fmlist), and
+  fmlist has no unauthenticated API. A project test fails if either host reappears in the
+  source.
 
 - Every station change now starts on HD1. The subchannel line-up belongs to the station, so
   carrying an HD2 or HD3 choice over to a station that only broadcasts HD1 left the decoder
