@@ -2,7 +2,32 @@
 
 *[English version](CHANGELOG.md)*
 
-## Sin publicar — compilación de desarrollo 3.2
+## Sin publicar — compilación de desarrollo 3.3
+
+- Nueva fila de **información de la emisora** bajo los datos de la canción, con el **eslogan**,
+  el **código PI**, la **ubicación** y la **potencia**.
+- El eslogan, el indicativo, el identificador de instalación de la FCC y el emplazamiento del
+  transmisor salen ahora de las tramas SIS que la propia emisora transmite. libnrsc5 ya entregaba
+  esos eventos; el plugin los descartaba todos salvo el nombre de la emisora.
+- La ciudad de licencia, la potencia radiada (ERP) y la altura sobre el terreno medio (HAAT)
+  vienen del servicio público FM Query de la FCC, consultado con el identificador de instalación
+  que la emisora transmite. Las respuestas se guardan en memoria y en disco durante 30 días,
+  porque quien recorre la banda vuelve constantemente a las mismas emisoras y una licencia cambia
+  a lo sumo unas pocas veces al año. La consulta corre fuera del hilo del decodificador y, si
+  falla, solo cuesta esos tres campos: todo lo que llega por SIS ya está en pantalla. Las
+  emisoras licenciadas fuera de Estados Unidos no se consultan.
+- El código PI se deriva del indicativo con la regla RBDS, que es lo que mostraría un receptor
+  RDS: HD Radio no lo transmite y ninguna base de datos lo publica. Los indicativos de tres
+  letras son una tabla de excepciones del estándar en vez de una fórmula, y los códigos PI de
+  Canadá y México se asignan en lugar de derivarse, así que esos se dejan vacíos en vez de
+  inventarlos.
+- El concesionario, la clase, el HAAT y las coordenadas del transmisor están en el tooltip, de
+  modo que los campos nuevos le cuestan al Artwork una sola fila de 37 px.
+- `radio-locator.com` y `fmlist.org` **no** se consultan, a propósito. Las páginas con eslogan,
+  potencia y ubicación están marcadas como `Disallow` para todo agente en sus `robots.txt`
+  (`/info` y `/cgi-bin/pat` en radio-locator, `/export/` y `/demoapi/` en fmlist), y fmlist no
+  tiene API sin autenticación. Una prueba del proyecto falla si cualquiera de los dos dominios
+  reaparece en el código.
 
 - Cada cambio de emisora entra en HD1. La lista de subcanales pertenece a la emisora, así que
   conservar un HD2 o HD3 al pasar a una emisora que solo transmite HD1 dejaba al decodificador

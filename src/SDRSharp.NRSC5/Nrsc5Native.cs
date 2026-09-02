@@ -174,6 +174,21 @@ internal static class Nrsc5Layout
     // struct { const char *name; } station_name;
     internal const int StationNameName = 0;
 
+    // struct { const char *country_code; int fcc_facility_id; } station_id;
+    internal const int StationIdCountryCode = 0;
+    internal static readonly int StationIdFacilityId = Ptr;
+
+    // struct { const char *slogan; } station_slogan;
+    internal const int StationSloganSlogan = 0;
+
+    // struct { const char *message; } station_message;
+    internal const int StationMessageMessage = 0;
+
+    // struct { float latitude; float longitude; int altitude; } station_location;
+    internal const int StationLocationLatitude = 0;
+    internal const int StationLocationLongitude = 4;
+    internal const int StationLocationAltitude = 8;
+
     // struct nrsc5_sig_service_t { next; uint8_t type; uint16_t number;
     //                              const char *name; components; audio_component; }
     internal const int SigServiceNext = 0;
