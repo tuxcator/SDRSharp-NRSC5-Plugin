@@ -42,6 +42,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private const int MinSyncLossGraceMs = 1500;
     private const int MaxArtworkBytes = 8 * 1024 * 1024;
     private const int MaxCachedImages = 24;
+    private const int MaxAlerts = 16;
     // Ramp used whenever the output changes source, short enough not to be heard as a dip.
     private const double FadeSeconds = 0.02;
     private const double MinSwitchHoldSeconds = 3.0;
@@ -61,6 +62,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private readonly object _artworkGate = new();
     private readonly object _bitrateGate = new();
     private readonly object _factsGate = new();
+    private readonly object _hereGate = new();
     private readonly FccStationDirectory _fccDirectory = new();
     private readonly ReverseGeocoder _geocoder = new();
     private readonly PcmRingBuffer _audio = new((int)(Nrsc5Native.AudioSampleRate * 3));
@@ -110,6 +112,9 @@ internal sealed class Nrsc5Engine : IDisposable
     private StationFacts _facts = StationFacts.Empty;
     private int _lookedUpFacilityId;
     private string _geocodedSite = "";
+    private HereData _here = HereData.Empty;
+    private readonly List<HereTile> _trafficTiles = [];
+    private int _trafficSequence = -1;
     private CancellationTokenSource? _lookupCancellation;
 
     private readonly record struct CachedImage(byte[] Bytes, uint Mime, int Program);
@@ -143,6 +148,18 @@ internal sealed class Nrsc5Engine : IDisposable
     public StationFacts Facts
     {
         get { lock (_factsGate) return _facts; }
+    }
+
+    /// <summary>
+    /// Raised when a traffic or weather map advances, or an alert arrives. Separate from
+    /// the status event because the map window is the only thing that cares, and a
+    /// traffic mosaic changes a handful of times a minute at most.
+    /// </summary>
+    public event Action<HereData>? HereDataChanged;
+
+    public HereData HereData
+    {
+        get { lock (_hereGate) return _here; }
     }
 
     public bool Enabled
@@ -291,6 +308,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// How far the VFO sits from the centre of the spectrum. The decoder always works at
+    /// baseband, so this is the frequency the mixer has to shift the IQ down by.
+    /// </summary>
     public void SetTuningOffset(double value)
     {
         Volatile.Write(ref _tuningOffset, value);
@@ -310,6 +331,7 @@ internal sealed class Nrsc5Engine : IDisposable
             // Fine tuning keeps the station facts on screen: SIS repeats slowly, and
             // blanking them on every nudge of the dial would make the panel flicker.
             ResetStationFacts();
+            ResetHereData();
         }
 
         CancelPendingSyncLoss();
@@ -327,6 +349,10 @@ internal sealed class Nrsc5Engine : IDisposable
         if (Enabled) _retuneTimer.Change(350, Timeout.Infinite);
     }
 
+    /// <summary>
+    /// Tears the native session down and builds a new one. Used after a retune and by the
+    /// panel button, because libnrsc5 has no way to be told the signal changed underneath it.
+    /// </summary>
     public void Restart()
     {
         if (_disposed || !Enabled) return;
@@ -334,6 +360,14 @@ internal sealed class Nrsc5Engine : IDisposable
         if (Enabled) Start();
     }
 
+    /// <summary>
+    /// The hot path. Every IQ buffer SDR# produces passes through here: it is mixed down to
+    /// baseband, resampled to the 744187.5 S/s libnrsc5 expects and pushed into the decoder.
+    ///
+    /// It runs on SDR#'s own thread, so it allocates nothing per call and reuses the scratch
+    /// arrays; a garbage collection here would be heard as a gap in the audio of the whole
+    /// application, not just this plugin.
+    /// </summary>
     public unsafe void ProcessIq(Complex* buffer, int length)
     {
         if (!Enabled || length <= 1) return;
@@ -386,6 +420,13 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Where HD audio replaces the analog programme, by overwriting SDR#'s buffer in place.
+    ///
+    /// The swap is never abrupt: the level ramps across the change, and the decision to use
+    /// HD at all depends on the prebuffer having enough held to survive a fade. When it runs
+    /// dry the analog programme comes back the same way.
+    /// </summary>
     public unsafe void ProcessAudio(float* buffer, int length)
     {
         if (!Enabled || !ReplaceAnalogAudio || !Status.Synced || length < 2) return;
@@ -487,6 +528,11 @@ internal sealed class Nrsc5Engine : IDisposable
         _geocoder.Dispose();
     }
 
+    /// <summary>
+    /// Opens a libnrsc5 pipe session and points it at the callback. The decoder is fed
+    /// samples rather than opening a radio itself, which is what lets it share the receiver
+    /// SDR# already owns.
+    /// </summary>
     private void Start()
     {
         lock (_sessionGate)
@@ -530,6 +576,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Closes the native session and clears everything derived from the old signal, so a
+    /// restart cannot show the previous station's metadata next to the new one's audio.
+    /// </summary>
     private void Stop(string message)
     {
         CancelPendingSyncLoss();
@@ -555,6 +605,11 @@ internal sealed class Nrsc5Engine : IDisposable
         });
     }
 
+    /// <summary>
+    /// Measures the signal for the panel meters. Deliberately sampled rather than exhaustive:
+    /// a couple of hundred samples ten times a second is enough for a meter a human reads,
+    /// and this runs on the audio thread where the full sum would not be free.
+    /// </summary>
     private void UpdateSignalMonitor(float[] samples, int complexCount)
     {
         var now = Stopwatch.GetTimestamp();
@@ -592,6 +647,12 @@ internal sealed class Nrsc5Engine : IDisposable
         });
     }
 
+    /// <summary>
+    /// Every event libnrsc5 raises arrives here, on a native thread. The union is read at the
+    /// offsets <see cref="Nrsc5Layout"/> derives, and the whole body is wrapped so no managed
+    /// exception can ever cross back into C: unwinding through the native frames would take
+    /// down SDR#, not just the plugin.
+    /// </summary>
     private void OnNativeEvent(IntPtr evt, IntPtr opaque)
     {
         try
@@ -655,16 +716,25 @@ internal sealed class Nrsc5Engine : IDisposable
                 case Nrsc5Event.StationId:
                     ReceiveStationId(union);
                     break;
+                case Nrsc5Event.HereImage:
+                    ReceiveHereImage(union);
+                    break;
+                case Nrsc5Event.EmergencyAlert:
+                    ReceiveEmergencyAlert(union);
+                    break;
                 case Nrsc5Event.StationLocation:
                     var latitude = ReadFloat(union, Nrsc5Layout.StationLocationLatitude);
                     var longitude = ReadFloat(union, Nrsc5Layout.StationLocationLongitude);
                     var altitude = Marshal.ReadInt32(union, Nrsc5Layout.StationLocationAltitude);
+                    // A station that has not set its site sends 0,0, and the panel showed
+                    // that as "0,000N 0,000E" - a coordinate in the Atlantic dressed up as
+                    // an answer. Only a plausible pair counts as having a location.
                     UpdateFacts(f => f with
                     {
                         Latitude = latitude,
                         Longitude = longitude,
                         Altitude = altitude,
-                        HasLocation = true
+                        HasLocation = ReverseGeocoder.IsPlausible(latitude, longitude)
                     });
                     BeginSiteLookup(latitude, longitude);
                     break;
@@ -676,6 +746,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Raw HDC codec frames, used only to measure the real bitrate of the selected subchannel
+    /// and to notice that a subchannel exists. The audio itself arrives already decoded.
+    /// </summary>
     private void ReceiveHdc(IntPtr union)
     {
         var program = Marshal.ReadInt32(union, Nrsc5Layout.HdcProgram);
@@ -697,6 +771,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Decoded PCM for one subchannel. Only the selected one is kept; the others are dropped
+    /// here rather than buffered, because a station can carry three or four at once.
+    /// </summary>
     private void ReceiveAudio(IntPtr union)
     {
         var program = Marshal.ReadInt32(union, Nrsc5Layout.AudioProgram);
@@ -711,6 +789,11 @@ internal sealed class Nrsc5Engine : IDisposable
         _audio.Write(pcm);
     }
 
+    /// <summary>
+    /// Song metadata, and the XHDR that says which LOT image belongs to the track playing.
+    /// The XHDR is remembered per subchannel: a lot id only means something within its own
+    /// service, so one station's HD2 art would otherwise land on HD1.
+    /// </summary>
     private void ReceiveId3(IntPtr union)
     {
         var program = Marshal.ReadInt32(union, Nrsc5Layout.Id3Program);
@@ -819,6 +902,11 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Records that a subchannel really is on the air, which is what Previous and Next step
+    /// through. Discovered from traffic rather than assumed, so the selector never offers an
+    /// HD3 that does not exist.
+    /// </summary>
     private void MarkProgramAvailable(int program)
     {
         if (program is < 0 or > 7) return;
@@ -878,6 +966,149 @@ internal sealed class Nrsc5Engine : IDisposable
     private static bool LooksLikeImage(byte[] data) =>
         data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF ||
         data.Length >= 8 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47;
+
+    /// <summary>
+    /// A HERE map tile. Traffic arrives as nine of them over a minute or two, weather as
+    /// one whole image. The sequence number changes when the station publishes a new map,
+    /// which is what discards the half-built previous one.
+    ///
+    /// Only stations carrying the HERE data service send these at all, which in practice
+    /// means the larger US stations; most stations send nothing here and the map window
+    /// stays empty, which is not a fault.
+    /// </summary>
+    private void ReceiveHereImage(IntPtr union)
+    {
+        var imageType = Marshal.ReadInt32(union, Nrsc5Layout.HereImageType);
+        if (imageType is not (Nrsc5HereImage.Traffic or Nrsc5HereImage.Weather)) return;
+
+        var size = Marshal.ReadInt32(union, Nrsc5Layout.HereImageSize);
+        var data = Marshal.ReadIntPtr(union, Nrsc5Layout.HereImageData);
+        if (size <= 0 || size > MaxArtworkBytes || data == IntPtr.Zero) return;
+
+        var bytes = new byte[size];
+        Marshal.Copy(data, bytes, 0, size);
+
+        var tile = new HereTile(
+            Marshal.ReadInt32(union, Nrsc5Layout.HereImageN1),
+            bytes,
+            ReadFloat(union, Nrsc5Layout.HereImageLatitude1),
+            ReadFloat(union, Nrsc5Layout.HereImageLongitude1),
+            ReadFloat(union, Nrsc5Layout.HereImageLatitude2),
+            ReadFloat(union, Nrsc5Layout.HereImageLongitude2));
+
+        var sequence = Marshal.ReadInt32(union, Nrsc5Layout.HereImageSeq);
+        var timeUtc = ReadTm(Marshal.ReadIntPtr(union, Nrsc5Layout.HereImageTime));
+        var expected = Marshal.ReadInt32(union, Nrsc5Layout.HereImageN2);
+
+        HereData next;
+        lock (_hereGate)
+        {
+            if (imageType == Nrsc5HereImage.Weather)
+            {
+                // Weather is whole in one frame; n1 and n2 count publications, not parts.
+                _here = _here with
+                {
+                    Weather = new HereImageSet(false, sequence, timeUtc, [tile], 1)
+                };
+            }
+            else
+            {
+                if (sequence != _trafficSequence)
+                {
+                    _trafficSequence = sequence;
+                    _trafficTiles.Clear();
+                }
+                _trafficTiles.RemoveAll(existing => existing.Part == tile.Part);
+                _trafficTiles.Add(tile);
+                _here = _here with
+                {
+                    Traffic = new HereImageSet(
+                        true, sequence, timeUtc,
+                        _trafficTiles.OrderBy(t => t.Part).ToList(),
+                        expected is > 0 and <= Nrsc5HereImage.TrafficTiles ? expected : Nrsc5HereImage.TrafficTiles)
+                };
+            }
+            next = _here;
+        }
+        HereDataChanged?.Invoke(next);
+    }
+
+    /// <summary>
+    /// An emergency alert. The same alert repeats for as long as it is active, so it is
+    /// matched on its text rather than appended blindly; the newest sits first.
+    /// </summary>
+    private void ReceiveEmergencyAlert(IntPtr union)
+    {
+        var message = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.AlertMessage)).Trim();
+        if (message.Length == 0) return;
+
+        var count = Marshal.ReadInt32(union, Nrsc5Layout.AlertNumLocations);
+        var pointer = Marshal.ReadIntPtr(union, Nrsc5Layout.AlertLocations);
+        var locations = new List<int>();
+        if (pointer != IntPtr.Zero && count is > 0 and <= 1024)
+        {
+            var raw = new int[count];
+            Marshal.Copy(pointer, raw, 0, count);
+            locations.AddRange(raw);
+        }
+
+        var alert = new HdAlert(
+            message,
+            Marshal.ReadInt32(union, Nrsc5Layout.AlertCategory1),
+            Marshal.ReadInt32(union, Nrsc5Layout.AlertCategory2),
+            Marshal.ReadInt32(union, Nrsc5Layout.AlertLocationFormat),
+            locations,
+            DateTime.UtcNow);
+
+        HereData next;
+        lock (_hereGate)
+        {
+            var alerts = new List<HdAlert>(_here.Alerts.Count + 1) { alert };
+            foreach (var existing in _here.Alerts)
+                if (!string.Equals(existing.Message, message, StringComparison.Ordinal))
+                    alerts.Add(existing);
+            if (alerts.Count > MaxAlerts) alerts.RemoveRange(MaxAlerts, alerts.Count - MaxAlerts);
+            _here = _here with { Alerts = alerts };
+            next = _here;
+        }
+        HereDataChanged?.Invoke(next);
+    }
+
+    /// <summary>Reads the nine-int <c>struct tm</c> libnrsc5 hands over, as UTC.</summary>
+    private static DateTime ReadTm(IntPtr pointer)
+    {
+        if (pointer == IntPtr.Zero) return default;
+        try
+        {
+            return new DateTime(
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmYear) + 1900,
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmMon) + 1,
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmMday),
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmHour),
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmMin),
+                Marshal.ReadInt32(pointer, Nrsc5Layout.TmSec),
+                DateTimeKind.Utc);
+        }
+        catch
+        {
+            // A station that has not set its clock sends a tm that is not a real date.
+            return default;
+        }
+    }
+
+    private void ResetHereData()
+    {
+        HereData next;
+        lock (_hereGate)
+        {
+            if (_here.IsEmpty && _trafficTiles.Count == 0) return;
+            _trafficTiles.Clear();
+            _trafficSequence = -1;
+            _here = HereData.Empty;
+            next = _here;
+        }
+        HereDataChanged?.Invoke(next);
+    }
 
     /// <summary>
     /// The station ID frame carries the country and the FCC facility ID, which is the key
@@ -1091,6 +1322,10 @@ internal sealed class Nrsc5Engine : IDisposable
         UpdateStatus(s => s with { BufferTargetSeconds = target });
     }
 
+    /// <summary>
+    /// Drops the resampler and mixer state. Their history belongs to the old signal, and
+    /// carrying it across a retune would put a burst of noise into the first decoded block.
+    /// </summary>
     private void ResetIq()
     {
         lock (_iqGate)
@@ -1102,6 +1337,11 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Fires once the grace period after a lost-sync event has expired without recovery.
+    /// The delay is what stops a momentary fade from throwing away the prebuffer and
+    /// audibly dropping back to analog for a second.
+    /// </summary>
     private void ConfirmSyncLoss()
     {
         if (_disposed) return;
@@ -1177,6 +1417,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Empties the prebuffer and puts the output back on the analog path. Called whenever the
+    /// audio in the ring no longer belongs to what the listener is tuned to.
+    /// </summary>
     private void ResetAudio()
     {
         lock (_audioGate)
@@ -1193,6 +1437,10 @@ internal sealed class Nrsc5Engine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Forgets everything the previous station said about itself: artwork caches, the XHDR
+    /// map and the subchannel line-up.
+    /// </summary>
     private void ResetMetadata()
     {
         lock (_artworkGate)

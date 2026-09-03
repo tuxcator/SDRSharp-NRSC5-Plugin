@@ -61,6 +61,10 @@ internal sealed class PolyphaseResampler
         Reset();
     }
 
+    /// <summary>
+    /// Clears the filter history. Called on retune: the samples still in the delay line
+    /// belong to the previous signal and would smear across the first block of the new one.
+    /// </summary>
     public void Reset()
     {
         _workPairs = 0;
@@ -186,9 +190,16 @@ internal sealed class PolyphaseResampler
         }
     }
 
+    /// <summary>
+    /// The ideal low-pass impulse response the window is applied to.
+    /// </summary>
     private static double Sinc(double x) =>
         Math.Abs(x) < 1e-9 ? 1.0 : Math.Sin(Math.PI * x) / (Math.PI * x);
 
+    /// <summary>
+    /// Modified Bessel function of the first kind, order zero: the Kaiser window is defined
+    /// in terms of it. Evaluated by its series, which converges quickly for the range used here.
+    /// </summary>
     private static double BesselI0(double x)
     {
         double sum = 1, term = 1;

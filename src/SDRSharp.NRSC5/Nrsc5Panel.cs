@@ -42,6 +42,9 @@ internal sealed class Nrsc5Panel : UserControl
 
     private readonly Nrsc5Engine _engine;
     private readonly Button _surround = NewFlatButton("Surround");
+    private readonly Button _trafficButton = NewFlatButton("Traffic map");
+    private readonly Button _weatherButton = NewFlatButton("Weather map");
+    private HereMapsForm? _maps;
     private readonly CheckBox _enabled = NewCheckBox("Enable HD decoding");
     private readonly CheckBox _replaceAudio = NewCheckBox("Auto HD audio", true);
     private readonly CheckBox _useBuffer = NewCheckBox("Buffer", true);
@@ -136,7 +139,7 @@ internal sealed class Nrsc5Panel : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
 
         root.Controls.Add(BuildHeader(), 0, 0);
         root.Controls.Add(_state, 0, 1);
@@ -175,6 +178,7 @@ internal sealed class Nrsc5Panel : UserControl
         _engine.BufferSeconds = (double)_bufferSeconds.Value;
         _engine.StatusChanged += EngineOnStatusChanged;
         _engine.StationFactsChanged += EngineOnStationFactsChanged;
+        _engine.HereDataChanged += EngineOnHereDataChanged;
         EngineOnStatusChanged(_engine.Status);
         EngineOnStationFactsChanged(_engine.Facts);
     }
@@ -185,6 +189,9 @@ internal sealed class Nrsc5Panel : UserControl
         {
             _engine.StatusChanged -= EngineOnStatusChanged;
             _engine.StationFactsChanged -= EngineOnStationFactsChanged;
+            _engine.HereDataChanged -= EngineOnHereDataChanged;
+            _maps?.Dispose();
+            _maps = null;
             _tips.Dispose();
             var image = _artwork.Image;
             _artwork.Image = null;
@@ -193,6 +200,11 @@ internal sealed class Nrsc5Panel : UserControl
         base.Dispose(disposing);
     }
 
+    /// <summary>
+    /// The title block. The byline carries the development build number so a tester can tell
+    /// at a glance which version is loaded, which matters when the plugin is installed by
+    /// copying a DLL over another one.
+    /// </summary>
     private Control BuildHeader()
     {
         var panel = new Panel { Dock = DockStyle.Fill, BackColor = Card, Margin = new Padding(0, 0, 0, 3) };
@@ -218,6 +230,10 @@ internal sealed class Nrsc5Panel : UserControl
         return panel;
     }
 
+    /// <summary>
+    /// A host whose only job is to keep the artwork square. The panel is a tall narrow column,
+    /// so the image has to be centred and sized by hand rather than simply docked.
+    /// </summary>
     private Control BuildArtworkHost()
     {
         var host = new Panel { Dock = DockStyle.Fill, BackColor = Background, Margin = Padding.Empty };
@@ -227,6 +243,10 @@ internal sealed class Nrsc5Panel : UserControl
         return host;
     }
 
+    /// <summary>
+    /// Sizes the artwork to the largest square that fits, centred. Album art is square and
+    /// letterboxing it inside a tall box wastes the panel's scarcest resource.
+    /// </summary>
     private void LayoutArtworkSquare(Control host)
     {
         var side = Math.Max(0, Math.Min(host.ClientSize.Width - 8, host.ClientSize.Height - 8));
@@ -267,6 +287,28 @@ internal sealed class Nrsc5Panel : UserControl
         _tips.SetToolTip(_piCode, "RDS PI code in hexadecimal, derived from the call sign. HD Radio does not transmit it.");
         return grid;
     }
+
+    /// <summary>
+    /// Opens the map window, or brings it back if it was closed. The window is created
+    /// on demand and seeded with whatever has already arrived, so opening it after a
+    /// station has been decoding for a while shows the map rather than an empty frame.
+    /// </summary>
+    private void OpenMaps(HereView view)
+    {
+        if (_maps is null || _maps.IsDisposed)
+        {
+            _maps = new HereMapsForm();
+            _maps.FormClosed += (_, _) => _maps = null;
+            _maps.SetData(_engine.HereData);
+        }
+        // Owned by SDR#'s window, so it floats above it. Without an owner it dropped
+        // behind the main window the moment SDR# took focus back, which made the two
+        // buttons look as though they did nothing.
+        _maps.Owner = FindForm();
+        _maps.ShowSection(view);
+    }
+
+    private void EngineOnHereDataChanged(HereData data) => _maps?.SetData(data);
 
     private void EngineOnStationFactsChanged(StationFacts facts)
     {
@@ -343,6 +385,10 @@ internal sealed class Nrsc5Panel : UserControl
         return string.Join(Environment.NewLine, lines);
     }
 
+    /// <summary>
+    /// The six signal cards. Laid out as a percentage grid so they grow with the panel rather
+    /// than clipping, which is what lets the same panel work docked and floating.
+    /// </summary>
     private Control BuildMetrics()
     {
         var grid = new TableLayoutPanel
@@ -366,6 +412,11 @@ internal sealed class Nrsc5Panel : UserControl
         return grid;
     }
 
+    /// <summary>
+    /// Previous and Next around the current subchannel. A pair of buttons rather than a drop
+    /// down: the list of subchannels changes as the station is discovered, and a menu that
+    /// rewrites itself under the pointer is worse than two arrows.
+    /// </summary>
     private Control BuildChannelSelector()
     {
         var panel = new TableLayoutPanel
@@ -417,18 +468,22 @@ internal sealed class Nrsc5Panel : UserControl
         return button;
     }
 
+    /// <summary>
+    /// The controls at the foot of the panel. Every row here is absolute height taken out of
+    /// the artwork, so the labels are terse on purpose and nothing is added lightly.
+    /// </summary>
     private Control BuildControls()
     {
         var container = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             BackColor = Card,
             Padding = new Padding(3, 2, 3, 2),
             Margin = new Padding(0, 3, 0, 0)
         };
-        for (var i = 0; i < 3; i++) container.RowStyles.Add(new RowStyle(SizeType.Percent, 33.333F));
+        for (var i = 0; i < 4; i++) container.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
 
         // Labels stay terse on purpose: docked, the panel is only ~250 px wide and
         // anything longer is clipped rather than wrapped.
@@ -461,14 +516,36 @@ internal sealed class Nrsc5Panel : UserControl
         actions.Controls.Add(restart, 0, 0);
         actions.Controls.Add(_surround, 1, 0);
 
+        // The data services get their own row: a map needs a window, not a corner of a
+        // panel docked into 250 px, so these two only open one.
+        var maps = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Card,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        maps.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        maps.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        maps.Controls.Add(_trafficButton, 0, 0);
+        maps.Controls.Add(_weatherButton, 1, 0);
+
+        _trafficButton.Click += (_, _) => OpenMaps(HereView.Traffic);
+        _weatherButton.Click += (_, _) => OpenMaps(HereView.Weather);
+
         container.Controls.Add(toggles, 0, 0);
         container.Controls.Add(buffering, 0, 1);
         container.Controls.Add(actions, 0, 2);
+        container.Controls.Add(maps, 0, 3);
 
         _tips.SetToolTip(_calibration, "dBm is an estimate. Adjust this offset using a known reference signal.");
         _tips.SetToolTip(_useBuffer, "Turn off for the lowest latency. Leave on to ride out brief signal dropouts.");
         _tips.SetToolTip(_bufferSeconds, "How much HD audio to accumulate before it replaces the analog path.");
         _tips.SetToolTip(_surround, "Widens the HD stereo image. Only affects HD audio, never the analog path.");
+        _tips.SetToolTip(_trafficButton, "Traffic map, weather map and emergency alerts, in their own window.");
+        _tips.SetToolTip(_weatherButton, "Traffic map, weather map and emergency alerts, in their own window.");
         return container;
     }
 
@@ -481,6 +558,10 @@ internal sealed class Nrsc5Panel : UserControl
         Margin = Padding.Empty
     };
 
+    /// <summary>
+    /// Paints the signal side of the panel. Fires about ten times a second from a decoder
+    /// thread, so it marshals to the UI thread and does nothing but assign strings.
+    /// </summary>
     private void EngineOnStatusChanged(Nrsc5Status status)
     {
         if (IsDisposed) return;
@@ -516,6 +597,9 @@ internal sealed class Nrsc5Panel : UserControl
         SetArtwork(status.Artwork, status.ArtworkIsStationLogo);
     }
 
+    /// <summary>
+    /// Lists the subchannels the station actually broadcasts, as discovered from the SIG table.
+    /// </summary>
     private static string DescribePrograms(Nrsc5Status status)
     {
         if (status.ProgramMask == 0) return "--";
@@ -525,6 +609,11 @@ internal sealed class Nrsc5Panel : UserControl
         return string.Join(" ", names);
     }
 
+    /// <summary>
+    /// Swaps the artwork, comparing by reference first so an unchanged image is not decoded
+    /// and reallocated ten times a second. The old bitmap is disposed explicitly: GDI handles
+    /// are not memory and the collector is in no hurry to release them.
+    /// </summary>
     private void SetArtwork(byte[]? bytes, bool isStationLogo)
     {
         if (ReferenceEquals(bytes, _artworkReference) && isStationLogo == _artworkIsLogo) return;
@@ -548,6 +637,10 @@ internal sealed class Nrsc5Panel : UserControl
         _artwork.Invalidate();
     }
 
+    /// <summary>
+    /// Decodes a broadcast image, honouring the EXIF orientation tag. Stations do send
+    /// sideways artwork, and a receiver that ignores the tag displays it sideways.
+    /// </summary>
     private static Bitmap? DecodeArtwork(byte[] bytes)
     {
         using var stream = new MemoryStream(bytes, false);

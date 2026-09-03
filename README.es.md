@@ -57,6 +57,7 @@ Capturado con un Airspy HF+ Discovery a 912 ksps. El campo `Device SN` está enm
 - Efecto envolvente opcional que ensancha la imagen estéreo del audio HD.
 - Información de la emisora: eslogan, código PI, ubicación y potencia, con el concesionario, la
   clase, el HAAT y las coordenadas del transmisor en el tooltip.
+- Mapas de tráfico y clima y alertas de emergencia del servicio de datos HERE, en ventana propia.
 - Diseño responsivo sin scroll interno: el Artwork cuadrado y las métricas se ajustan al tamaño del
   panel.
 

@@ -34,6 +34,10 @@ internal sealed class LookupCache<TValue> where TValue : class
         _maxEntries = maxEntries;
     }
 
+    /// <summary>
+    /// Returns the cached answer, joins a request already in flight for the same key, or
+    /// starts one. Callers never have to know which of the three happened.
+    /// </summary>
     public Task<TValue?> GetOrAddAsync(string key, Func<CancellationToken, Task<TValue?>> fetch, CancellationToken token)
     {
         lock (_gate)
@@ -57,6 +61,10 @@ internal sealed class LookupCache<TValue> where TValue : class
         }
     }
 
+    /// <summary>
+    /// Runs the fetch and records the result. Only a completed lookup is written: a thrown
+    /// exception leaves the cache untouched so the next attempt retries.
+    /// </summary>
     private async Task<TValue?> RunAsync(string key, Func<CancellationToken, Task<TValue?>> fetch, CancellationToken token)
     {
         var value = await fetch(token).ConfigureAwait(false);

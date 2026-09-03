@@ -95,6 +95,10 @@ internal sealed class ReverseGeocoder : IDisposable
         Math.Abs(latitude) <= 90 && Math.Abs(longitude) <= 180 &&
         (Math.Abs(latitude) > 0.01 || Math.Abs(longitude) > 0.01);
 
+    /// <summary>
+    /// Asks the US Census geocoder. Returns null for a point outside the United States, which
+    /// is what hands the query on to OpenStreetMap.
+    /// </summary>
     private async Task<GeocodedSite?> QueryCensusAsync(float latitude, float longitude, CancellationToken token)
     {
         var url = string.Format(CultureInfo.InvariantCulture, CensusFormat, latitude, longitude);
@@ -102,6 +106,11 @@ internal sealed class ReverseGeocoder : IDisposable
         return ParseCensus(body);
     }
 
+    /// <summary>
+    /// Asks OpenStreetMap, one request at a time and never faster than their usage policy
+    /// allows. The gate is held across the delay so two stations tuned in quick succession
+    /// cannot both slip through.
+    /// </summary>
     private async Task<GeocodedSite?> QueryNominatimAsync(float latitude, float longitude, CancellationToken token)
     {
         await _nominatimGate.WaitAsync(token).ConfigureAwait(false);

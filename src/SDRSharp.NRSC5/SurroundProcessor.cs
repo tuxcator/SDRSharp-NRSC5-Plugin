@@ -52,6 +52,11 @@ internal sealed class SurroundProcessor
 
     public void Reset() => _resetPending = true;
 
+    /// <summary>
+    /// Widens one stereo frame in place. Mid and side are separated, the side is boosted and
+    /// mixed with a delayed copy, and the low end stays centred so the result does not hollow
+    /// out or cancel when someone listens in mono.
+    /// </summary>
     public void Process(ref float left, ref float right)
     {
         if (_resetPending)
@@ -80,6 +85,10 @@ internal sealed class SurroundProcessor
         right = SoftClip(mid - spread);
     }
 
+    /// <summary>
+    /// Empties the delay line and the filter memory, so a new station does not inherit the
+    /// tail of the previous one.
+    /// </summary>
     private void ClearState()
     {
         Array.Clear(_delay);

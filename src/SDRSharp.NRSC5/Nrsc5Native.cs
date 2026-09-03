@@ -104,6 +104,53 @@ internal static class Nrsc5SigServiceType
     internal const int Data = 1;
 }
 
+/// <summary>Which HERE map a <c>here_image</c> event carries.</summary>
+internal static class Nrsc5HereImage
+{
+    internal const int Traffic = 8;
+    internal const int Weather = 13;
+
+    /// <summary>A traffic map always arrives as nine tiles; weather comes whole.</summary>
+    internal const int TrafficTiles = 9;
+}
+
+/// <summary>
+/// Emergency alert categories from NRSC-4. An Amber alert arrives as Safety or Rescue,
+/// a hurricane or a storm as Weather, an earthquake as Geophysical.
+/// </summary>
+internal static class Nrsc5AlertCategory
+{
+    internal static string Describe(int category) => category switch
+    {
+        1 => "Non-specific",
+        2 => "Geophysical",
+        3 => "Weather",
+        4 => "Safety",
+        5 => "Security",
+        6 => "Rescue",
+        7 => "Fire",
+        8 => "Health",
+        9 => "Environmental",
+        10 => "Transportation",
+        11 => "Utilities",
+        12 => "Hazmat",
+        30 => "Test",
+        _ => ""
+    };
+}
+
+/// <summary>How the location codes in an emergency alert should be read.</summary>
+internal static class Nrsc5LocationFormat
+{
+    internal static string Describe(int format) => format switch
+    {
+        0 => "SAME",
+        1 => "FIPS",
+        2 => "ZIP",
+        _ => ""
+    };
+}
+
 /// <summary>
 /// Byte offsets of every <c>nrsc5_event_t</c> union member this plugin reads,
 /// derived from the C layout rules instead of being written out by hand.
@@ -188,6 +235,42 @@ internal static class Nrsc5Layout
     internal const int StationLocationLatitude = 0;
     internal const int StationLocationLongitude = 4;
     internal const int StationLocationAltitude = 8;
+
+    // struct { int image_type, seq, n1, n2; struct tm *time_utc;
+    //          float latitude1, longitude1, latitude2, longitude2;
+    //          const char *name; unsigned int size; const uint8_t *data; } here_image;
+    internal const int HereImageType = 0;
+    internal const int HereImageSeq = 4;
+    internal const int HereImageN1 = 8;
+    internal const int HereImageN2 = 12;
+    internal static readonly int HereImageTime = Align(16, Ptr);
+    internal static readonly int HereImageLatitude1 = HereImageTime + Ptr;
+    internal static readonly int HereImageLongitude1 = HereImageLatitude1 + 4;
+    internal static readonly int HereImageLatitude2 = HereImageLatitude1 + 8;
+    internal static readonly int HereImageLongitude2 = HereImageLatitude1 + 12;
+    internal static readonly int HereImageName = Align(HereImageLatitude1 + 16, Ptr);
+    internal static readonly int HereImageSize = HereImageName + Ptr;
+    internal static readonly int HereImageData = Align(HereImageSize + 4, Ptr);
+
+    // struct { const char *message; const uint8_t *control_data; int control_data_length;
+    //          int category1, category2, location_format, num_locations;
+    //          const int *locations; } emergency_alert;
+    internal const int AlertMessage = 0;
+    internal static readonly int AlertControlData = Ptr;
+    internal static readonly int AlertControlDataLength = Ptr * 2;
+    internal static readonly int AlertCategory1 = AlertControlDataLength + 4;
+    internal static readonly int AlertCategory2 = AlertControlDataLength + 8;
+    internal static readonly int AlertLocationFormat = AlertControlDataLength + 12;
+    internal static readonly int AlertNumLocations = AlertControlDataLength + 16;
+    internal static readonly int AlertLocations = Align(AlertControlDataLength + 20, Ptr);
+
+    // struct tm, as both MSVC and MinGW lay it out: nine ints, seconds first.
+    internal const int TmSec = 0;
+    internal const int TmMin = 4;
+    internal const int TmHour = 8;
+    internal const int TmMday = 12;
+    internal const int TmMon = 16;
+    internal const int TmYear = 20;
 
     // struct nrsc5_sig_service_t { next; uint8_t type; uint16_t number;
     //                              const char *name; components; audio_component; }
