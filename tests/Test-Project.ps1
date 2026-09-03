@@ -18,6 +18,8 @@ $required = @(
     'src\SDRSharp.NRSC5\FccStationDirectory.cs',
     'src\SDRSharp.NRSC5\LookupCache.cs',
     'src\SDRSharp.NRSC5\ReverseGeocoder.cs',
+    'src\SDRSharp.NRSC5\HereImages.cs',
+    'src\SDRSharp.NRSC5\HereMapsForm.cs',
     'scripts\Get-Dependencies.ps1',
     'scripts\Build.ps1',
     'scripts\Install.ps1'
@@ -35,7 +37,9 @@ foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5
     'StationFactsChanged','ResetStationFacts','BeginFccLookup','PiCodeFor','InfoCard',
     'PI CODE','LOCATION','POWER',
     'ReverseGeocoder','ParseCensus','ParseNominatim','BeginSiteLookup','SitePlace','IsPlausible',
-    'SiteContradictsCallsign','CountryFromCallsign','EffectiveCountry') {
+    'SiteContradictsCallsign','CountryFromCallsign','EffectiveCountry',
+    'Nrsc5Event.HereImage','Nrsc5Event.EmergencyAlert','ReceiveHereImage','ReceiveEmergencyAlert',
+    'HereMapsForm','HereDataChanged','ResetHereData','Traffic map','Weather map') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
 }
 
@@ -59,6 +63,22 @@ if ($cache -notmatch 'FormatVersion') {
     throw 'La cache en disco debe llevar version de formato para descartar la de builds anteriores.'
 }
 
+$panelSource = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\Nrsc5Panel.cs')
+# El mosaico se arma por las esquinas de cada tesela, no por su numero de pieza: el
+# orden en que una emisora numera las nueve partes no esta documentado en ningun sitio.
+$maps = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\HereMapsForm.cs')
+if ($maps -notmatch 'perDegreeX' -or $maps -notmatch 'perDegreeY') {
+    throw 'Las teselas del mapa deben ubicarse por latitud y longitud, no por indice.'
+}
+# Sin propietario, la ventana de mapas se va detras de SDR# en cuanto este toma el foco.
+if ($panelSource -notmatch '_maps\.Owner\s*=') {
+    throw 'La ventana de mapas debe pertenecer a la ventana de SDR# para quedarse al frente.'
+}
+# Los mapas necesitan cientos de pixeles: no pueden vivir dentro del panel acoplado.
+if ($panelSource -match 'PictureBox\s+_traffic|PictureBox\s+_weather') {
+    throw 'Los mapas van en su propia ventana, no incrustados en el panel.'
+}
+
 # Nominatim exige un User-Agent identificable y como mucho una peticion por segundo.
 $geo = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\ReverseGeocoder.cs')
 foreach ($required in 'UserAgent','NominatimInterval') {
@@ -67,7 +87,9 @@ foreach ($required in 'UserAgent','NominatimInterval') {
     }
 }
 
-if ($source -match 'AutoScroll\s*=\s*true' -or $source -match 'MinimumSize\s*=\s*new Size\(370, 700\)') {
+# La regla es sobre el panel acoplado, no sobre cualquier ventana: la lista de alertas
+# vive en un marco redimensionable y ahi el scroll es lo correcto.
+if ($panelSource -match 'AutoScroll\s*=\s*true' -or $panelSource -match 'MinimumSize\s*=\s*new Size\(370, 700\)') {
     throw 'El panel no debe forzar scroll ni un tamaño rígido.'
 }
 

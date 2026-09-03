@@ -6,6 +6,7 @@ VerifyPiCodes();
 VerifyFccParsing();
 VerifyGeocoding();
 VerifySuspectSites();
+VerifyDataServices();
 
 if (args.Length != 1) throw new ArgumentException("Indique la carpeta NRSC5Runtime.");
 var runtime = Path.GetFullPath(args[0]);
@@ -62,6 +63,26 @@ static void VerifyEventLayout()
     Check("station_location.latitude", Nrsc5Layout.StationLocationLatitude, 0);
     Check("station_location.longitude", Nrsc5Layout.StationLocationLongitude, 4);
     Check("station_location.altitude", Nrsc5Layout.StationLocationAltitude, 8);
+    Check("here_image.image_type", Nrsc5Layout.HereImageType, 0);
+    Check("here_image.seq", Nrsc5Layout.HereImageSeq, 4);
+    Check("here_image.n1", Nrsc5Layout.HereImageN1, 8);
+    Check("here_image.n2", Nrsc5Layout.HereImageN2, 12);
+    Check("here_image.time_utc", Nrsc5Layout.HereImageTime, 16);
+    Check("here_image.latitude1", Nrsc5Layout.HereImageLatitude1, 24);
+    Check("here_image.longitude1", Nrsc5Layout.HereImageLongitude1, 28);
+    Check("here_image.latitude2", Nrsc5Layout.HereImageLatitude2, 32);
+    Check("here_image.longitude2", Nrsc5Layout.HereImageLongitude2, 36);
+    Check("here_image.name", Nrsc5Layout.HereImageName, 40);
+    Check("here_image.size", Nrsc5Layout.HereImageSize, 48);
+    Check("here_image.data", Nrsc5Layout.HereImageData, 56);
+    Check("emergency_alert.message", Nrsc5Layout.AlertMessage, 0);
+    Check("emergency_alert.control_data", Nrsc5Layout.AlertControlData, 8);
+    Check("emergency_alert.control_data_length", Nrsc5Layout.AlertControlDataLength, 16);
+    Check("emergency_alert.category1", Nrsc5Layout.AlertCategory1, 20);
+    Check("emergency_alert.category2", Nrsc5Layout.AlertCategory2, 24);
+    Check("emergency_alert.location_format", Nrsc5Layout.AlertLocationFormat, 28);
+    Check("emergency_alert.num_locations", Nrsc5Layout.AlertNumLocations, 32);
+    Check("emergency_alert.locations", Nrsc5Layout.AlertLocations, 40);
 
     Console.WriteLine("[OK] Los offsets de nrsc5_event_t coinciden con el encabezado oficial x64.");
 
@@ -251,6 +272,72 @@ static void VerifySuspectSites()
         var actual = StationFacts.CountryFromCallsign(callsign);
         if (actual != expected)
             throw new InvalidOperationException($"Pais de '{callsign}': se esperaba '{expected}', se obtuvo '{actual}'.");
+    }
+}
+
+// Un mapa de trafico llega en nueve teselas a lo largo de un minuto o dos, cada una con
+// sus propias esquinas. El mosaico se arma por geografia, no por el numero de pieza, asi
+// que lo que hay que sostener es que los limites del conjunto son la union de los de las
+// teselas y que una tesela sin limites reales no cuenta.
+static void VerifyDataServices()
+{
+    var tiles = new List<HereTile>
+    {
+        new(1, [1], 42.0f, -88.0f, 41.5f, -87.5f),
+        new(2, [2], 42.0f, -87.5f, 41.5f, -87.0f),
+        new(3, [3], 41.5f, -88.0f, 41.0f, -87.5f)
+    };
+    var set = new HereImageSet(true, 3, new DateTime(2026, 9, 2, 14, 30, 0, DateTimeKind.Utc), tiles, 9);
+
+    CheckFloat("norte", set.North, 42.0f);
+    CheckFloat("sur", set.South, 41.0f);
+    CheckFloat("oeste", set.West, -88.0f);
+    CheckFloat("este", set.East, -87.0f);
+    if (set.Received != 3) throw new InvalidOperationException($"Recibidas: se esperaban 3, hubo {set.Received}.");
+    if (set.Complete) throw new InvalidOperationException("Tres de nueve teselas no es un mapa completo.");
+    if (!new HereImageSet(true, 3, default, tiles, 3).Complete)
+        throw new InvalidOperationException("Tres de tres teselas si es un mapa completo.");
+
+    // Una emisora que aun no tiene mapa manda esquinas degeneradas; esas no se pintan.
+    if (new HereTile(1, [0], 0, 0, 0, 0).HasBounds)
+        throw new InvalidOperationException("Unas esquinas en cero no son limites validos.");
+    if (new HereTile(1, [0], 41.0f, -88.0f, 42.0f, -87.0f).HasBounds)
+        throw new InvalidOperationException("El norte por debajo del sur no son limites validos.");
+    if (!tiles[0].HasBounds)
+        throw new InvalidOperationException("Unos limites reales deben aceptarse.");
+
+    // Una alerta Amber llega como Safety o Rescue; un huracan como Weather.
+    var amber = new HdAlert("AMBER Alert: silver sedan, plate 8XYZ123", 4, 6, 1, [17031, 17043], DateTime.UtcNow);
+    if (amber.Categories != "Safety · Rescue")
+        throw new InvalidOperationException($"Categorias: se obtuvo '{amber.Categories}'.");
+    if (amber.DescribeLocations() != "FIPS: 17031, 17043")
+        throw new InvalidOperationException($"Localizaciones: se obtuvo '{amber.DescribeLocations()}'.");
+
+    var storm = new HdAlert("Hurricane warning in effect", 3, 0, 0, [], DateTime.UtcNow);
+    if (storm.Categories != "Weather")
+        throw new InvalidOperationException($"Una categoria sola: se obtuvo '{storm.Categories}'.");
+    if (storm.DescribeLocations().Length != 0)
+        throw new InvalidOperationException("Sin codigos no debe describirse ninguna localizacion.");
+    if (new HdAlert("x", 0, 0, 0, [], DateTime.UtcNow).Categories != "Uncategorised")
+        throw new InvalidOperationException("Una alerta sin categoria debe decirlo, no quedarse vacia.");
+
+    // Una emisora sin emplazamiento configurado manda 0,0. El panel lo enseñaba como
+    // "0,000N 0,000E", que es el Atlantico disfrazado de respuesta.
+    if (ReverseGeocoder.IsPlausible(0, 0))
+        throw new InvalidOperationException("0,0 no puede contar como emplazamiento.");
+    if (StationFacts.Empty.HasLocation)
+        throw new InvalidOperationException("Sin evento de posicion no hay emplazamiento.");
+
+    if (!HereData.Empty.IsEmpty) throw new InvalidOperationException("HereData.Empty debe estar vacio.");
+    if (HereData.Empty with { Traffic = set } is { IsEmpty: true })
+        throw new InvalidOperationException("Con un mapa de trafico ya no esta vacio.");
+
+    Console.WriteLine("[OK] Los mapas de trafico y clima se ubican por geografia y las alertas se clasifican.");
+
+    static void CheckFloat(string name, float actual, float expected)
+    {
+        if (Math.Abs(actual - expected) > 0.0001f)
+            throw new InvalidOperationException($"Limite {name}: se esperaba {expected}, se obtuvo {actual}.");
     }
 }
 

@@ -56,6 +56,7 @@ Captured with an Airspy HF+ Discovery at 912 ksps. The `Device SN` field is mask
 - Optional surround effect that widens the HD stereo image.
 - Station information: slogan, PI code, location and power, with the licensee, class, HAAT and
   transmitter coordinates in the tooltip.
+- Traffic and weather maps and emergency alerts from the HERE data service, in a window of their own.
 - Responsive layout with no inner scrolling: the square artwork and the metric cards scale with the
   panel.
 

@@ -2,6 +2,29 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
+## Unreleased — development build 3.3.4
+
+- **Traffic and weather maps, and emergency alerts, in a window of their own.** Two new
+  buttons at the bottom of the panel open it. Maps need hundreds of pixels in both
+  directions and the panel is docked into a column of about 250, so they are given a
+  frame the listener can size and place freely; the window is modeless and closing it
+  does not touch the decoder.
+- The maps come from the HERE data service, which libnrsc5 already reported through
+  `NRSC5_EVENT_HERE_IMAGE` and the plugin was discarding. A traffic map arrives as nine
+  tiles over a minute or two; weather arrives whole.
+- **The mosaic is assembled from each tile's own corners, not from its part number.**
+  Every tile carries the latitude and longitude of the ground it covers, so the map is
+  laid out geographically and does not depend on guessing how a station orders the nine
+  pieces — an order that is documented nowhere.
+- Emergency alerts arrive through `NRSC5_EVENT_EMERGENCY_ALERT`, also previously
+  discarded. Amber alerts come through as Safety or Rescue, hurricanes and storms as
+  Weather, earthquakes as Geophysical; the plugin shows what arrives rather than
+  filtering by category. The counties or postcodes an alert covers are shown as the raw
+  SAME, FIPS or ZIP codes the station broadcasts, with the format named.
+- Only stations carrying the HERE data service broadcast these maps at all, which in
+  practice means the larger US stations. On a station that does not, the window opens
+  and stays empty, and says so.
+
 ## Unreleased — development build 3.3.3
 
 - **A transmitter site that contradicts the call sign is now flagged rather than named.**

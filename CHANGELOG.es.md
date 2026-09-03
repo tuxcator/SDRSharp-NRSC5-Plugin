@@ -2,6 +2,29 @@
 
 *[English version](CHANGELOG.md)*
 
+## Sin publicar — compilación de desarrollo 3.3.4
+
+- **Mapas de tráfico y clima, y alertas de emergencia, en una ventana propia.** Dos
+  botones nuevos al pie del panel la abren. Un mapa necesita cientos de píxeles en ambas
+  direcciones y el panel va acoplado en una columna de unos 250, así que se le da un
+  marco que el oyente puede dimensionar y colocar donde quiera; la ventana no es modal y
+  cerrarla no toca el decodificador.
+- Los mapas vienen del servicio de datos HERE, que libnrsc5 ya reportaba por
+  `NRSC5_EVENT_HERE_IMAGE` y el plugin descartaba. Un mapa de tráfico llega en nueve
+  teselas a lo largo de un minuto o dos; el de clima llega entero.
+- **El mosaico se arma con las esquinas de cada tesela, no con su número de pieza.** Cada
+  tesela lleva la latitud y la longitud del terreno que cubre, así que el mapa se coloca
+  geográficamente y no depende de adivinar en qué orden numera una emisora las nueve
+  partes, orden que no está documentado en ningún sitio.
+- Las alertas de emergencia llegan por `NRSC5_EVENT_EMERGENCY_ALERT`, también descartado
+  hasta ahora. Las alertas Amber entran como Safety o Rescue, los huracanes y tormentas
+  como Weather, los sismos como Geophysical; el plugin muestra lo que llega en vez de
+  filtrar por categoría. Los condados o códigos postales que cubre una alerta se muestran
+  como los códigos SAME, FIPS o ZIP crudos que emite la emisora, con el formato indicado.
+- Solo las emisoras que llevan el servicio de datos HERE emiten estos mapas, lo que en la
+  práctica son las estadounidenses grandes. En una que no lo lleve, la ventana se abre
+  vacía y lo dice.
+
 ## Sin publicar — compilación de desarrollo 3.3.3
 
 - **Un emplazamiento que contradice al indicativo se marca en vez de nombrarse.** La 3.3.1
