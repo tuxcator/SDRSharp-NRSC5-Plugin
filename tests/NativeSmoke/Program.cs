@@ -7,6 +7,8 @@ VerifyFccParsing();
 VerifyGeocoding();
 VerifySuspectSites();
 VerifyDataServices();
+VerifyTrackPresentation();
+VerifyIqQueue();
 
 if (args.Length != 1) throw new ArgumentException("Indique la carpeta NRSC5Runtime.");
 var runtime = Path.GetFullPath(args[0]);
@@ -56,6 +58,12 @@ static void VerifyEventLayout()
     Check("sig_service.name", Nrsc5Layout.SigServiceName, 16);
     Check("sig_service.audio_component", Nrsc5Layout.SigServiceAudioComponent, 32);
     Check("sig_service.next", Nrsc5Layout.SigServiceNext, 0);
+    // 4.0.0 reconoce los logos por el componente SIG de su puerto: estos offsets pasan a importar.
+    Check("lot.component", Nrsc5Layout.LotComponent, 48);
+    Check("sig_service.components", Nrsc5Layout.SigServiceComponents, 24);
+    Check("sig_component.type", Nrsc5Layout.SigComponentType, 8);
+    Check("sig_component.data.port", Nrsc5Layout.SigComponentDataPort, 12);
+    Check("sig_component.data.mime", Nrsc5Layout.SigComponentDataMime, 20);
     Check("station_id.country_code", Nrsc5Layout.StationIdCountryCode, 0);
     Check("station_id.fcc_facility_id", Nrsc5Layout.StationIdFacilityId, 8);
     Check("station_slogan.slogan", Nrsc5Layout.StationSloganSlogan, 0);
@@ -272,6 +280,129 @@ static void VerifySuspectSites()
         var actual = StationFacts.CountryFromCallsign(callsign);
         if (actual != expected)
             throw new InvalidOperationException($"Pais de '{callsign}': se esperaba '{expected}', se obtuvo '{actual}'.");
+    }
+}
+
+// El Artwork desfasado de la 3.3.5 tenia dos causas: el parametro del XHDR se ignoraba,
+// y cuando la imagen correcta no estaba se mostraba la ultima vista, que era de otra
+// cancion. Visto en vivo en XHTKR 103.7: la cuna "LA KE BUENA / ESCUCHAS" salia con la
+// foto de un grupo de la cancion anterior.
+static void VerifyTrackPresentation()
+{
+    const uint primary = Nrsc5Mime.PrimaryImage;
+    // Semantica de nrsc5 src/output.c: param 0 + lot = mostrar, 1 = borrar, -1 = sin XHDR.
+    Check(XhdrReference.FromNative(primary, 0, 1234) == new XhdrReference(ArtworkDirective.Show, 1234), "XHDR param 0 muestra el LOT");
+    Check(XhdrReference.FromNative(primary, 1, -1).Directive == ArtworkDirective.Clear, "XHDR param 1 borra la imagen");
+    Check(XhdrReference.FromNative(0, -1, -1) == XhdrReference.Absent, "Sin XHDR no hay referencia");
+    Check(XhdrReference.FromNative(0x12345678, 0, 5) == XhdrReference.Absent, "Un MIME que no es imagen no es Artwork");
+
+    var song = new TrackInfo(0, "Me Vas A Extranar", "Banda MS", "", new XhdrReference(ArtworkDirective.Show, 7), 10);
+    var repeat = TrackInfo.Merge(song, new TrackInfo(0, "Me Vas A Extranar", "Banda MS", "", XhdrReference.Absent, 25));
+    Check(repeat.Xhdr.Lot == 7 && repeat.LotStamp == 10, "Repetir la cancion sin XHDR conserva su imagen y su inicio");
+    var liner = TrackInfo.Merge(song, new TrackInfo(0, "LA KE BUENA", "ESCUCHAS", "", XhdrReference.Absent, 25));
+    Check(liner.Xhdr == XhdrReference.Absent && liner.LotStamp == 25, "Una pista nueva sin XHDR no hereda la imagen anterior");
+    var flushed = TrackInfo.Merge(song, new TrackInfo(0, "Me Vas A Extranar", "Banda MS", "", new XhdrReference(ArtworkDirective.Clear, -1), 30));
+    Check(flushed.Xhdr.Directive == ArtworkDirective.Clear, "Un borrado explicito gana aunque sea la misma cancion");
+    var otherProgram = TrackInfo.Merge(song, song with { Program = 1, Xhdr = XhdrReference.Absent });
+    Check(otherProgram.Xhdr == XhdrReference.Absent, "Otro subcanal nunca hereda");
+
+    byte[] cover = [1], previousCover = [2], logo = [3];
+    Check(ArtworkResolver.Resolve(new(ArtworkDirective.Show, 7), true, cover, previousCover, logo) == new ArtworkChoice(cover, false),
+        "La imagen referenciada gana");
+    Check(ArtworkResolver.Resolve(new(ArtworkDirective.Show, 7), true, null, previousCover, logo) == new ArtworkChoice(logo, true),
+        "Mientras la imagen no llega se muestra el logo, nunca otra portada");
+    Check(ArtworkResolver.Resolve(new(ArtworkDirective.Clear, -1), true, null, cover, logo) == new ArtworkChoice(logo, true),
+        "En una emisora que vincula imagenes, un borrado muestra el logo");
+    Check(ArtworkResolver.Resolve(XhdrReference.Absent, true, null, cover, logo) == new ArtworkChoice(logo, true),
+        "En una emisora que vincula imagenes, una pista sin vinculo no tiene imagen");
+    // XHTKR 103.7 en vivo: 730 ID3 seguidos con param 1 y ninguno con param 0, pero imagenes
+    // en cada subcanal durante las canciones. Su param 1 no informa de nada.
+    Check(ArtworkResolver.Resolve(new(ArtworkDirective.Clear, -1), false, null, cover, logo) == new ArtworkChoice(cover, false),
+        "Si la emisora nunca vincula, la imagen llegada durante la pista es de la pista");
+    Check(ArtworkResolver.Resolve(new(ArtworkDirective.Clear, -1), false, null, null, logo) == new ArtworkChoice(logo, true),
+        "Si nada ha llegado durante la pista, el logo: nunca la portada anterior");
+    Check(ArtworkResolver.Resolve(XhdrReference.Absent, false, null, cover, logo) == new ArtworkChoice(cover, false),
+        "Sin XHDR nunca, la imagen llegada durante la pista es de la pista");
+    Check(ArtworkResolver.Resolve(XhdrReference.Absent, false, null, null, null) == new ArtworkChoice(null, false),
+        "Sin nada que mostrar, nada");
+
+    var queue = new PresentationQueue<string>();
+    queue.Enqueue(1000, 0, "a");
+    queue.Enqueue(2000, 0, "b");
+    queue.Enqueue(3000, 0, "c");
+    Check(!queue.TryTakeDue(999, 1, 100, out _), "Nada se muestra antes de que su audio suene");
+    Check(queue.TryTakeDue(2500, 1, 100, out var due) && due == "b" && queue.Count == 1,
+        "Si vencen varias, se muestra la mas reciente");
+    Check(queue.TryTakeDue(0, 100, 100, out due) && due == "c", "El limite de edad las libera si la reproduccion se detiene");
+
+    Console.WriteLine("[OK] El Artwork sigue al XHDR y a la pista que suena, nunca a la ultima imagen vista.");
+
+    static void Check(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}
+
+// La cola entre el hilo IQ de SDR# y el decodificador: acotada, con buferes reutilizados,
+// y sin mezclar bloques aunque productor y consumidor corran a la vez.
+static void VerifyIqQueue()
+{
+    using (var queue = new IqBlockQueue { MaxQueuedFloats = 1000 })
+    {
+        var data = Enumerable.Range(0, 400).Select(i => (float)i).ToArray();
+        Check(queue.TryEnqueue(data, 912000, 100, 1), "Un bloque entra");
+        Check(queue.TryDequeue(0, out var block), "Un bloque sale");
+        Check(block.Floats == 400 && block.Rate == 912000 && block.Offset == 100 && block.Generation == 1,
+            "El bloque conserva tasa, desplazamiento y generacion");
+        Check(block.Buffer.AsSpan(0, 400).SequenceEqual(data), "El contenido llega intacto");
+        var reused = block.Buffer;
+        queue.Return(block.Buffer);
+        Check(queue.TryEnqueue(data, 912000, 100, 2) && queue.TryDequeue(0, out block) && ReferenceEquals(block.Buffer, reused),
+            "Un bufer devuelto se reutiliza en vez de asignar otro");
+        queue.Return(block.Buffer);
+
+        Check(queue.TryEnqueue(data, 912000, 100, 3) && queue.TryEnqueue(data, 912000, 100, 3), "Dos bloques caben");
+        Check(!queue.TryEnqueue(data, 912000, 100, 3) && queue.Dropped == 1, "El tercero excede el limite y se descarta");
+        queue.Clear();
+        Check(queue.QueuedFloats == 0 && !queue.TryDequeue(0, out _), "Clear vacia la cola");
+    }
+
+    using (var queue = new IqBlockQueue { MaxQueuedFloats = 64 * 1024 * 1024 })
+    {
+        const int blocks = 3000;
+        var producer = new Thread(() =>
+        {
+            var payload = new float[2048];
+            for (var n = 0; n < blocks; n++)
+            {
+                Array.Fill(payload, n);
+                queue.TryEnqueue(payload.AsSpan(0, 512 + n % 1500), 912000, 0, n);
+            }
+        });
+        producer.Start();
+        var last = -1;
+        var taken = 0;
+        while (producer.IsAlive || queue.QueuedFloats > 0)
+        {
+            if (!queue.TryDequeue(10, out var block)) continue;
+            Check(block.Generation > last, "Los bloques salen en orden");
+            last = block.Generation;
+            Check(block.Floats == 512 + block.Generation % 1500, "Longitud del bloque");
+            for (var i = 0; i < block.Floats; i++) Check(block.Buffer[i] == block.Generation, "Bloque sin mezclar con otro");
+            queue.Return(block.Buffer);
+            // Clear from this side, so it can land while the producer is mid-copy: the
+            // race that used to drive the queued count negative.
+            if (++taken % 200 == 0) queue.Clear();
+        }
+        producer.Join();
+        Check(taken > 0 && queue.QueuedFloats == 0, "La cuenta vuelve a cero aunque Clear coincida con copias en curso");
+    }
+
+    Console.WriteLine("[OK] La cola IQ es acotada, reutiliza buferes y no mezcla bloques entre hilos.");
+
+    static void Check(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
     }
 }
 

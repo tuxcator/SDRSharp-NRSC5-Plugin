@@ -46,7 +46,10 @@ Capturado con un Airspy HF+ Discovery a 912 ksps. El campo `Device SN` está enm
 - Alimenta `libnrsc5` mediante `nrsc5_open_pipe` y `nrsc5_pipe_samples_cf32`.
 - Muestra sincronización, MER, BER, nombre de estación, título, artista y álbum.
 - Recibe y muestra el Artwork de la canción y el logotipo de la emisora mediante eventos ID3/XHDR y
-  archivos LOT, con resolución por prioridad cuando la emisora no envía XHDR.
+  archivos LOT. Título y Artwork cambian cuando la canción suena, no cuando se decodifica, y si falta
+  la portada se muestra el logo del subcanal en vez de la de la canción anterior.
+- Decodifica en un hilo propio: el callback IQ de SDR# solo entrega el bloque, así que la
+  decodificación HD nunca compite con el procesamiento de señal de SDR#.
 - Reemplaza el audio analógico con PCM HD cuando existe sincronía y vuelve al analógico cuando se
   pierde.
 - Buffer de audio HD opcional y ajustable por segundos, con indicador de llenado.

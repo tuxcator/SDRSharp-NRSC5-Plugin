@@ -91,6 +91,7 @@ internal sealed class Nrsc5Panel : UserControl
     private readonly MetricCard _ber = new("BER", "--", Color.FromArgb(255, 110, 110));
     private readonly ToolTip _tips = new();
     private byte[]? _artworkReference;
+    private string _loadTip = "";
     private bool _artworkIsLogo;
 
     public Nrsc5Panel(ISharpControl control, Nrsc5Engine engine)
@@ -588,6 +589,18 @@ internal sealed class Nrsc5Panel : UserControl
         _mer.SetValue(status.Synced ? $"{status.MerLower:0.0} / {status.MerUpper:0.0} dB" : "-- / -- dB");
         _ber.SetValue(status.Synced ? status.Ber.ToString("0.0000") : "--");
         _iqInfo.Text = $"IQ {status.InputRate / 1000:0.0} kS/s   ·   VFO {status.OffsetHz / 1000:+0.0;-0.0;0.0} kHz   ·   PEAK {status.PeakDbfs:0.0} dBFS";
+        // What decoding costs, measured rather than assumed, in the tooltip: the line itself
+        // has no room left at the docked width. Only reassigned when the text changes.
+        var loadTip = status.DecoderLoad > 0
+            ? $"Decoder thread: {status.DecoderLoad * 100:0.0}% of one core per second of signal" + Environment.NewLine +
+              $"SDR# IQ thread: {status.IqThreadLoad * 100:0.00}% (it only queues the block now)" + Environment.NewLine +
+              $"IQ blocks dropped because the decoder fell behind: {status.DroppedBlocks}"
+            : "";
+        if (loadTip != _loadTip)
+        {
+            _loadTip = loadTip;
+            _tips.SetToolTip(_iqInfo, loadTip);
+        }
         _bufferState.Text = status.BufferTargetSeconds <= 0
             ? $"BUFFER OFF   ·   HELD {status.BufferedSeconds:0.00} s   ·   PROGRAMS {DescribePrograms(status)}"
             : $"BUFFER {status.BufferedSeconds:0.00} / {status.BufferTargetSeconds:0.00} s   ·   PROGRAMS {DescribePrograms(status)}";

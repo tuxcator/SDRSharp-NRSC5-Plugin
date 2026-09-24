@@ -18,11 +18,18 @@ $project = Join-Path $root 'src\SDRSharp.NRSC5\SDRSharp.NRSC5.csproj'
 $build = Join-Path $root 'src\SDRSharp.NRSC5\bin\Release\net9.0-windows'
 $dist = Join-Path $root 'dist\SDRSharp-NRSC5-Plugin'
 $runtimeOut = Join-Path $dist 'NRSC5Runtime'
+$versionSource = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\PluginInfo.cs')
+$versionMatch = [regex]::Match($versionSource, 'DevelopmentVersion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+if (-not $versionMatch.Success) { throw 'No se pudo leer la version de desarrollo del plugin.' }
+$developmentVersion = $versionMatch.Groups[1].Value
 
 & $dotnet restore $project --ignore-failed-sources
 if ($LASTEXITCODE -ne 0) { throw 'dotnet restore fallo.' }
 & $dotnet build $project -c Release --no-restore
 if ($LASTEXITCODE -ne 0) { throw 'dotnet build fallo.' }
+
+& $dotnet run --project (Join-Path $root 'tests\DspChecks\DspChecks.csproj') -c Release
+if ($LASTEXITCODE -ne 0) { throw 'Las pruebas de precision y continuidad DSP fallaron.' }
 
 if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dist, $runtimeOut | Out-Null
@@ -44,7 +51,8 @@ Copy-Item -LiteralPath (Join-Path $root 'packaging\Instalar.cmd') -Destination (
 & (Join-Path $root 'tests\Test-Project.ps1') -Distribution $dist
 & $dotnet run --project (Join-Path $root 'tests\NativeSmoke\NativeSmoke.csproj') -- $runtimeOut
 if ($LASTEXITCODE -ne 0) { throw 'La prueba nativa de libnrsc5 fallo.' }
-$zip = Join-Path $root 'dist\SDRSharp-NRSC5-Plugin-v0.1.0-win-x64.zip'
+$zip = Join-Path $root "dist\SDRSharp-NRSC5-Plugin-Dev-$developmentVersion-win-x64.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "[OK] Paquete creado: $dist" -ForegroundColor Green
+Write-Host "[OK] Dev ${developmentVersion}: $zip" -ForegroundColor Green

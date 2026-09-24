@@ -20,6 +20,10 @@ $required = @(
     'src\SDRSharp.NRSC5\ReverseGeocoder.cs',
     'src\SDRSharp.NRSC5\HereImages.cs',
     'src\SDRSharp.NRSC5\HereMapsForm.cs',
+    'src\SDRSharp.NRSC5\IqMixer.cs',
+    'src\SDRSharp.NRSC5\IqBlockQueue.cs',
+    'src\SDRSharp.NRSC5\TrackPresentation.cs',
+    'src\SDRSharp.NRSC5\MetadataTrace.cs',
     'scripts\Get-Dependencies.ps1',
     'scripts\Build.ps1',
     'scripts\Install.ps1'
@@ -30,8 +34,8 @@ foreach ($relative in $required) {
 
 $source = (Get-ChildItem -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5') -Filter '*.cs' -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join [Environment]::NewLine
 foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5_pipe_samples_cf32','ProcessAudio','SelectedProgram','Nrsc5Event.Lot','ReceiveLot','BitrateKbps','SignalProbeSamples','SyncLossGraceMs','ConfirmSyncLoss','_lastDigitalTicks','remainingMs','_lastFrequency','LayoutArtworkSquare','DecodeArtwork','DbmCalibrationOffset','BuildChannelSelector','PREVIOUS','NEXT  ▶','Synchronized HD','AutoScroll = false','RowStyle(SizeType.Percent','Dock = DockStyle.Fill',
-    'PolyphaseResampler','MixToBaseband','BufferSeconds','BufferingEnabled','EnsureCapacityFrames',
-    'Nrsc5Layout','Nrsc5Mime.StationLogo','RefreshArtwork','_stationLogoByProgram','_latestArtByProgram',
+    'PolyphaseResampler','IqMixer','BufferSeconds','BufferingEnabled','EnsureCapacityFrames',
+    'Nrsc5Layout','Nrsc5Mime.StationLogo','RefreshArtwork','FindLogoLocked','FindReferencedLocked',
     'ReceiveSig','MarkProgramAvailable','StepProgram','ProgramMask','PanelFonts',
     'Nrsc5Event.StationSlogan','Nrsc5Event.StationId','Nrsc5Event.StationLocation',
     'StationFactsChanged','ResetStationFacts','BeginFccLookup','PiCodeFor','InfoCard',
@@ -39,7 +43,9 @@ foreach ($token in 'ProcessorType.RawIQ','Nrsc5Native.NativeFmSampleRate','nrsc5
     'ReverseGeocoder','ParseCensus','ParseNominatim','BeginSiteLookup','SitePlace','IsPlausible',
     'SiteContradictsCallsign','CountryFromCallsign','EffectiveCountry',
     'Nrsc5Event.HereImage','Nrsc5Event.EmergencyAlert','ReceiveHereImage','ReceiveEmergencyAlert',
-    'HereMapsForm','HereDataChanged','ResetHereData','Traffic map','Weather map') {
+    'HereMapsForm','HereDataChanged','ResetHereData','Traffic map','Weather map',
+    'IqBlockQueue','DecoderLoop','DecodeBlock','PresentDueTracks','ArtworkResolver','XhdrReference.FromNative',
+    'Id3XhdrParam','_portProgram','TotalConsumedFrames','DecoderLoad') {
     if ($source -notmatch [regex]::Escape($token)) { throw "Falta integracion: $token" }
 }
 
@@ -77,6 +83,19 @@ if ($panelSource -notmatch '_maps\.Owner\s*=') {
 # Los mapas necesitan cientos de pixeles: no pueden vivir dentro del panel acoplado.
 if ($panelSource -match 'PictureBox\s+_traffic|PictureBox\s+_weather') {
     throw 'Los mapas van en su propia ventana, no incrustados en el panel.'
+}
+
+# 4.0.0: libnrsc5 decodifica dentro de nrsc5_pipe_samples_cf32. Llamarla desde el callback
+# IQ de SDR# le quita a SDR# unos 9 ms de cada bloque de 36 ms; va en el hilo del decodificador.
+$engine = Get-Content -Raw -LiteralPath (Join-Path $root 'src\SDRSharp.NRSC5\Nrsc5Engine.cs')
+$processIq = [regex]::Match($engine, 'public unsafe void ProcessIq[\s\S]*?\r?\n    \}').Value
+if (-not $processIq) { throw 'No se pudo aislar ProcessIq para revisarlo.' }
+if ($processIq -match 'nrsc5_pipe_samples_cf32|_resampler\.Process|_mixer\.Process') {
+    throw 'ProcessIq corre en el hilo de SDR#: solo debe encolar el bloque, no mezclar, remuestrear ni decodificar.'
+}
+# El Artwork desfasado venia de mostrar la ultima imagen vista cuando faltaba la correcta.
+if ($engine -match '_latestArtByProgram') {
+    throw 'No debe volver el respaldo de "ultima imagen vista": muestra la portada de otra cancion.'
 }
 
 # Nominatim exige un User-Agent identificable y como mucho una peticion por segundo.

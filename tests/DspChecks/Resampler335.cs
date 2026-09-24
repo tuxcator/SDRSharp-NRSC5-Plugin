@@ -1,9 +1,9 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace SDRSharp.NRSC5;
+
+// Copia literal del remuestreador de Dev 3.3.5, solo para pruebas: es la linea base con la
+// que se mide la 4.0.0 en el mismo proceso. No forma parte del plugin.
 
 /// <summary>
 /// Arbitrary-ratio complex resampler built on a Kaiser-windowed sinc polyphase bank.
@@ -17,7 +17,7 @@ namespace SDRSharp.NRSC5;
 /// Callers must mix the wanted carrier down to DC *before* resampling, otherwise the
 /// filter removes the very signal being tuned.
 /// </summary>
-internal sealed class PolyphaseResampler
+internal sealed class Resampler335
 {
     private const int Phases = 512;
     private const double KaiserBeta = 8.6;
@@ -31,6 +31,7 @@ internal sealed class PolyphaseResampler
     private const int MaxTaps = 160;
 
     private float[] _bank = Array.Empty<float>();
+    private float[] _pairedBank = Array.Empty<float>();
     private int _taps;
     private int _leftWing;
     private int _rightWing;
@@ -63,6 +64,12 @@ internal sealed class PolyphaseResampler
         if (_bank.Length < Phases * _taps) _bank = new float[Phases * _taps];
 
         BuildBank(Math.Min(1.0, outputRate / inputRate) * 0.45);
+        if (Vector256.IsHardwareAccelerated)
+        {
+            _pairedBank = new float[Phases * _taps * 2];
+            for (var i = 0; i < Phases * _taps; i++)
+                _pairedBank[i * 2] = _pairedBank[i * 2 + 1] = _bank[i];
+        }
         Reset();
     }
 
@@ -100,37 +107,36 @@ internal sealed class PolyphaseResampler
         if (maxOut < 0) maxOut = 0;
         EnsureCapacity(ref output, maxOut * 2);
 
-        // The per-sample state lives in locals for the length of the loop: fields written
-        // inside it are stored back to memory on every iteration, locals stay in registers.
-        var position = _position;
-        var step = _step;
-        var taps = _taps;
-        var leftWing = _leftWing;
-        var rightWing = _rightWing;
-        var workPairs = _workPairs;
-        var vectorised = Vector256.IsHardwareAccelerated;
-
         var produced = 0;
         while (true)
         {
-            var baseIndex = (int)Math.Floor(position);
-            if (baseIndex + rightWing >= workPairs) break;
-            if (baseIndex < leftWing) { position = leftWing; continue; }
+            var baseIndex = (int)Math.Floor(_position);
+            if (baseIndex + _rightWing >= _workPairs) break;
+            if (baseIndex < _leftWing) { _position = _leftWing; continue; }
 
-            var frac = position - baseIndex;
+            var frac = _position - baseIndex;
             var phase = (int)(frac * Phases);
             if (phase >= Phases) phase = Phases - 1;
 
-            var coefficients = phase * taps;
-            var start = (baseIndex - leftWing) * 2;
+            var coefficients = phase * _taps;
+            var start = (baseIndex - _leftWing) * 2;
             float real = 0, imag = 0;
             var tap = 0;
-            if (vectorised)
+            if (Vector256.IsHardwareAccelerated)
             {
-                (real, imag) = DotVector(coefficients, start);
-                tap = taps;
+                // Duplicate each coefficient for I/Q: four complex taps per vector,
+                // without deinterleaving the input or changing the filter response.
+                var sum = Vector256<float>.Zero;
+                for (; tap <= _taps - 4; tap += 4)
+                {
+                    var h = Vector256.LoadUnsafe(ref _pairedBank[0], (nuint)((coefficients + tap) * 2));
+                    var iq = Vector256.LoadUnsafe(ref _work[0], (nuint)(start + tap * 2));
+                    sum += h * iq;
+                }
+                real = sum.GetElement(0) + sum.GetElement(2) + sum.GetElement(4) + sum.GetElement(6);
+                imag = sum.GetElement(1) + sum.GetElement(3) + sum.GetElement(5) + sum.GetElement(7);
             }
-            for (; tap < taps; tap++)
+            for (; tap < _taps; tap++)
             {
                 var h = _bank[coefficients + tap];
                 real += h * _work[start + tap * 2];
@@ -141,77 +147,12 @@ internal sealed class PolyphaseResampler
             output[produced * 2] = real;
             output[produced * 2 + 1] = imag;
             produced++;
-            position += step;
+            _position += _step;
         }
-        _position = position;
 
         Consume();
         return produced;
     }
-
-    /// <summary>
-    /// One output sample: the dot product of the phase's taps with the input window.
-    ///
-    /// This is bound by memory, not arithmetic. Consecutive outputs land on unrelated
-    /// phases of a 512-phase bank, so every sample pulls a fresh row of coefficients from
-    /// L2. Dev 3.3.5 stored each coefficient twice, pre-paired for I and Q, which doubled
-    /// the bytes behind every sample: 164 KB of bank at 40 taps, 655 KB at 160. Here each
-    /// coefficient is stored once and spread across its I/Q pair in registers with one
-    /// permute per four taps, which is cheaper than the cache lines it saves. That is what
-    /// makes the difference at 2.4 MS/s and above, where the bank is largest.
-    ///
-    /// The rest matters at 32 to 40 taps, where setup and the final sum cost as much as
-    /// the multiplications: two accumulators so the adds do not wait on each other, fused
-    /// multiply-add where the CPU has it, and the eight lanes folded to one I/Q pair with
-    /// two adds and a shuffle instead of eight lane extracts and seven scalar adds.
-    ///
-    /// Tap counts are always even, so what is left after the eight-tap steps is always a
-    /// whole number of two-tap pairs.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private (float Real, float Imag) DotVector(int coefficients, int start)
-    {
-        ref var bank = ref MemoryMarshal.GetArrayDataReference(_bank);
-        ref var work = ref MemoryMarshal.GetArrayDataReference(_work);
-        var bankOffset = (nuint)coefficients;
-        var workOffset = (nuint)start;
-        var taps = _taps;
-
-        var lowPairs = Vector256.Create(0, 0, 1, 1, 2, 2, 3, 3);
-        var highPairs = Vector256.Create(4, 4, 5, 5, 6, 6, 7, 7);
-        var sum0 = Vector256<float>.Zero;
-        var sum1 = Vector256<float>.Zero;
-        var tap = 0;
-        for (; tap <= taps - 8; tap += 8)
-        {
-            var h = Vector256.LoadUnsafe(ref bank, bankOffset + (nuint)tap);
-            var offset = (nuint)(tap * 2);
-            sum0 = MultiplyAdd(Vector256.Shuffle(h, lowPairs), Vector256.LoadUnsafe(ref work, workOffset + offset), sum0);
-            sum1 = MultiplyAdd(Vector256.Shuffle(h, highPairs), Vector256.LoadUnsafe(ref work, workOffset + offset + 8), sum1);
-        }
-
-        // r,i,r,i,r,i,r,i -> r,i,r,i
-        var sum = sum0 + sum1;
-        var half = sum.GetLower() + sum.GetUpper();
-        for (; tap < taps; tap += 2)
-        {
-            var h0 = Unsafe.Add(ref bank, bankOffset + (nuint)tap);
-            var h1 = Unsafe.Add(ref bank, bankOffset + (nuint)tap + 1);
-            half = MultiplyAdd(Vector128.Create(h0, h0, h1, h1),
-                Vector128.LoadUnsafe(ref work, workOffset + (nuint)(tap * 2)), half);
-        }
-        // r,i,r,i -> (r+r),(i+i)
-        var pair = half + Vector128.Shuffle(half, Vector128.Create(2, 3, 0, 1));
-        return (pair.ToScalar(), pair.GetElement(1));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector256<float> MultiplyAdd(Vector256<float> a, Vector256<float> b, Vector256<float> c) =>
-        Fma.IsSupported ? Fma.MultiplyAdd(a, b, c) : a * b + c;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector128<float> MultiplyAdd(Vector128<float> a, Vector128<float> b, Vector128<float> c) =>
-        Fma.IsSupported ? Fma.MultiplyAdd(a, b, c) : a * b + c;
 
     private void Append(float[] input, int complexCount)
     {

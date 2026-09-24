@@ -27,11 +27,14 @@ internal sealed record Nrsc5Status(
     int ProgramMask,
     int SelectedProgram,
     float BufferedSeconds,
-    float BufferTargetSeconds)
+    float BufferTargetSeconds,
+    float DecoderLoad,
+    float IqThreadLoad,
+    long DroppedBlocks)
 {
     public static Nrsc5Status Idle { get; } = new(
         false, "Disabled", "", "", "", "", 0, 0, 0, 0, 0,
-        -120, -120, -150, 0, 0, null, false, 0, 0, 0, 0);
+        -120, -120, -150, 0, 0, null, false, 0, 0, 0, 0, 0, 0, 0);
 
     public bool HasProgram(int index) => (ProgramMask & (1 << index)) != 0;
 }
@@ -41,7 +44,11 @@ internal sealed class Nrsc5Engine : IDisposable
     private const int SignalProbeSamples = 256;
     private const int MinSyncLossGraceMs = 1500;
     private const int MaxArtworkBytes = 8 * 1024 * 1024;
-    private const int MaxCachedImages = 24;
+    private const int MaxCachedImages = 32;
+    // Metadata waits for its audio to be heard, but never longer than the largest buffer
+    // plus a margin: if playback stalls, a title shown late beats one never shown.
+    private static readonly long MaxPresentationDelayTicks =
+        (long)(Stopwatch.Frequency * (MaxBufferSeconds + 2.0));
     private const int MaxAlerts = 16;
     // Ramp used whenever the output changes source, short enough not to be heard as a dip.
     private const double FadeSeconds = 0.02;
@@ -75,10 +82,40 @@ internal sealed class Nrsc5Engine : IDisposable
     // Artwork caches. LOT ids are only unique within a service port, so the cache is
     // keyed by both; a bare lot id collides between subchannels of the same station.
     private readonly Dictionary<(int Port, int Lot), CachedImage> _lotImages = new();
-    private readonly (int Port, int Lot)[] _xhdrByProgram = new (int, int)[8];
-    private readonly byte[]?[] _latestArtByProgram = new byte[8][];
-    private readonly byte[]?[] _stationLogoByProgram = new byte[8][];
-    private byte[]? _stationLogo;
+    // Which program each data port belongs to, from the SIG table. A LOT that arrives
+    // before the SIG has no service to name its owner; its port still names it once the
+    // SIG is in. Without this, such images were pinned to whichever program happened to
+    // be selected, which is how one subchannel's logo ended up on another.
+    private readonly Dictionary<int, int> _portProgram = new();
+    // What the SIG table says each data port carries. XHTKR 103.7 sends its logos as plain
+    // JPEG and PNG files ("SLXHTKR$020001.png"), not under the station-logo MIME type, so
+    // the file alone does not say it is a logo; the port it arrives on does.
+    private readonly Dictionary<int, uint> _portMime = new();
+    // Whether each program has ever linked an image with XHDR parameter 0. Only then is its
+    // XHDR trusted; see ArtworkResolver for the station that made this necessary.
+    private readonly bool[] _programLinksImages = new bool[8];
+    private byte[]? _tracedArtwork;
+    private long _lotSequence;
+
+    // Now-playing metadata: what was last decoded per program, what the listener is
+    // hearing now, and what has been decoded but is still waiting in the prebuffer.
+    private readonly object _trackGate = new();
+    private readonly TrackInfo?[] _receivedTracks = new TrackInfo?[8];
+    private readonly TrackInfo?[] _presentedTracks = new TrackInfo?[8];
+    private readonly PresentationQueue<TrackInfo> _pendingTracks = new();
+
+    // The decoder thread. SDR#'s IQ callback only queues the block; mixing, resampling
+    // and libnrsc5 all run on this thread, off SDR#'s signal path.
+    private readonly IqBlockQueue _iqQueue = new();
+    private Thread? _decoderThread;
+    private volatile bool _decoderStopping;
+    private int _iqGeneration;
+    private long _decodeTicks;
+    private long _iqThreadTicks;
+    private double _accountedSignalSeconds;
+    private long _loadWindowStart = Stopwatch.GetTimestamp();
+    private int _loadWindows;
+    private int _iqThreadTraced;
 
     private IntPtr _session;
     private bool _disposed;
@@ -91,7 +128,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private double _inputSampleRate;
     private double _outputSampleRate;
     private double _tuningOffset;
-    private double _ncoPhase;
+    private readonly IqMixer _mixer = new();
     private float[] _mixed = new float[65536];
     private float[] _iqOutput = new float[65536];
     private bool _haveAudioPair;
@@ -117,11 +154,14 @@ internal sealed class Nrsc5Engine : IDisposable
     private int _trafficSequence = -1;
     private CancellationTokenSource? _lookupCancellation;
 
-    private readonly record struct CachedImage(byte[] Bytes, uint Mime, int Program);
+    /// <summary>
+    /// A received LOT image. <see cref="Sequence"/> orders arrivals across all ports, and
+    /// <see cref="ComponentMime"/> is what the SIG table says the port carries, when known.
+    /// </summary>
+    private readonly record struct CachedImage(byte[] Bytes, uint Mime, uint ComponentMime, int Program, long Sequence);
 
     public Nrsc5Engine()
     {
-        Array.Fill(_xhdrByProgram, (-1, -1));
         _callback = OnNativeEvent;
         _retuneTimer = new System.Threading.Timer(_ => { if (Enabled) Restart(); }, null, Timeout.Infinite, Timeout.Infinite);
         _syncLossTimer = new System.Threading.Timer(_ => ConfirmSyncLoss(), null, Timeout.Infinite, Timeout.Infinite);
@@ -240,6 +280,14 @@ internal sealed class Nrsc5Engine : IDisposable
             ResetAudio();
             BeginProgramSwitch();
             ResetBitrate();
+            // The prebuffer was just emptied, so nothing is waiting to be heard. The new
+            // program's latest metadata describes what it is broadcasting now.
+            TrackInfo? latest;
+            lock (_trackGate)
+            {
+                _pendingTracks.Clear();
+                latest = _receivedTracks[value];
+            }
             UpdateStatus(s => s with
             {
                 Title = "",
@@ -249,7 +297,8 @@ internal sealed class Nrsc5Engine : IDisposable
                 SelectedProgram = value,
                 Message = s.Synced ? $"Synchronized HD{value + 1}" : s.Message
             });
-            RefreshArtwork();
+            if (latest is not null) PresentTrack(latest);
+            else RefreshArtwork();
         }
     }
 
@@ -361,12 +410,12 @@ internal sealed class Nrsc5Engine : IDisposable
     }
 
     /// <summary>
-    /// The hot path. Every IQ buffer SDR# produces passes through here: it is mixed down to
-    /// baseband, resampled to the 744187.5 S/s libnrsc5 expects and pushed into the decoder.
-    ///
-    /// It runs on SDR#'s own thread, so it allocates nothing per call and reuses the scratch
-    /// arrays; a garbage collection here would be heard as a gap in the audio of the whole
-    /// application, not just this plugin.
+    /// SDR#'s IQ callback. Up to Dev 3.3.5 this mixed, resampled and ran libnrsc5 right
+    /// here, and libnrsc5 in pipe mode decodes inside the call: measured at 9 ms of every
+    /// 36 ms block while it searches for sync, all of it taken from SDR#'s own DSP thread.
+    /// Now the block is copied into a pooled queue and the call returns; the decoder
+    /// thread does the rest on another core. Nothing here waits, and nothing allocates
+    /// once the pool has warmed up.
     /// </summary>
     public unsafe void ProcessIq(Complex* buffer, int length)
     {
@@ -378,47 +427,130 @@ internal sealed class Nrsc5Engine : IDisposable
             UpdateStatus(s => s with { Synced = false, Message = $"IQ sample rate too low: {inputRate / 1000:0} kS/s; minimum 744.2 kS/s" });
             return;
         }
+        if (Volatile.Read(ref _session) == IntPtr.Zero) return;
 
-        int produced;
-        lock (_iqGate)
-        {
-            _resampler.Configure(inputRate, Nrsc5Native.NativeFmSampleRate);
-            EnsureCapacity(ref _mixed, length * 2);
-            MixToBaseband(buffer, length, inputRate);
-            produced = _resampler.Process(_mixed, length, ref _iqOutput);
-        }
+        var started = Stopwatch.GetTimestamp();
+        if (MetadataTrace.Enabled && Interlocked.Exchange(ref _iqThreadTraced, 1) == 0)
+            MetadataTrace.Write($"THRD SDR# calls ProcessIq on OS thread {MetadataTrace.CurrentOsThreadId()}");
+        // About a second of IQ may wait. Beyond that the decoder has fallen behind for
+        // good, and dropping blocks is kinder than a latency that only ever grows.
+        _iqQueue.MaxQueuedFloats = (int)Math.Min(int.MaxValue / 2, inputRate * 2);
+        var iq = MemoryMarshal.Cast<Complex, float>(new ReadOnlySpan<Complex>(buffer, length));
+        _iqQueue.TryEnqueue(iq, inputRate, Volatile.Read(ref _tuningOffset), Volatile.Read(ref _iqGeneration));
+        Interlocked.Add(ref _iqThreadTicks, Stopwatch.GetTimestamp() - started);
+    }
 
-        if (produced == 0) return;
-        UpdateSignalMonitor(_iqOutput, produced);
-        lock (_sessionGate)
+    private void EnsureDecoderThread()
+    {
+        if (_decoderThread is not null) return;
+        _decoderThread = new Thread(DecoderLoop)
         {
-            if (_session == IntPtr.Zero) return;
-            fixed (float* samples = _iqOutput)
-                Nrsc5Native.nrsc5_pipe_samples_cf32(_session, samples, (uint)(produced * 2));
+            IsBackground = true,
+            Name = "NRSC-5 decoder",
+            // Above normal, like SDR#'s own DSP: falling behind here is heard as a dropout.
+            Priority = ThreadPriority.AboveNormal
+        };
+        _decoderThread.Start();
+    }
+
+    /// <summary>
+    /// The decoder thread's whole life: take a block, decode it, give the buffer back.
+    /// Every event libnrsc5 raises now arrives on this thread instead of SDR#'s.
+    /// </summary>
+    private void DecoderLoop()
+    {
+        while (!_decoderStopping)
+        {
+            IqBlockQueue.Block block;
+            try
+            {
+                if (!_iqQueue.TryDequeue(250, out block)) continue;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            try
+            {
+                DecodeBlock(block);
+            }
+            catch
+            {
+                // One bad block must not take the decoder thread down with it.
+            }
+            finally
+            {
+                _iqQueue.Return(block.Buffer);
+            }
         }
     }
 
     /// <summary>
-    /// Shifts the selected VFO down to DC at the incoming sample rate. This has to happen
-    /// before decimation: the anti-alias filter is centred on DC, so mixing afterwards
-    /// would filter away the very carrier being tuned.
+    /// Mixes the block down to baseband, resamples it to the 744187.5 S/s libnrsc5
+    /// expects and decodes it. Mixing has to come first: the anti-alias filter is centred
+    /// on DC, so resampling before the shift would filter away the very carrier tuned.
     /// </summary>
-    private unsafe void MixToBaseband(Complex* input, int length, double inputRate)
+    private unsafe void DecodeBlock(IqBlockQueue.Block block)
     {
-        var phaseStep = -2.0 * Math.PI * Volatile.Read(ref _tuningOffset) / inputRate;
-        for (var index = 0; index < length; index++)
+        var started = Stopwatch.GetTimestamp();
+        var complexCount = block.Floats / 2;
+        int produced;
+        lock (_iqGate)
         {
-            var i = input[index].Real;
-            var q = input[index].Imag;
-            var cos = (float)Math.Cos(_ncoPhase);
-            var sin = (float)Math.Sin(_ncoPhase);
-            _mixed[index * 2] = i * cos - q * sin;
-            _mixed[index * 2 + 1] = i * sin + q * cos;
-            _ncoPhase += phaseStep;
-            if (_ncoPhase > Math.PI) _ncoPhase -= 2 * Math.PI;
-            else if (_ncoPhase < -Math.PI) _ncoPhase += 2 * Math.PI;
+            // Captured before a retune. The mixer and resampler have already been reset
+            // for the new frequency, and this IQ would only smear the old one into it.
+            if (block.Generation != _iqGeneration) return;
+            _resampler.Configure(block.Rate, Nrsc5Native.NativeFmSampleRate);
+            EnsureCapacity(ref _mixed, block.Floats);
+            _mixer.Process(new ReadOnlySpan<float>(block.Buffer, 0, block.Floats), _mixed, block.Offset, block.Rate);
+            produced = _resampler.Process(_mixed, complexCount, ref _iqOutput);
         }
+
+        if (produced > 0)
+        {
+            UpdateSignalMonitor(_iqOutput, produced);
+            lock (_sessionGate)
+            {
+                if (_session != IntPtr.Zero)
+                {
+                    fixed (float* samples = _iqOutput)
+                        Nrsc5Native.nrsc5_pipe_samples_cf32(_session, samples, (uint)(produced * 2));
+                }
+            }
+        }
+
+        AccountLoad(Stopwatch.GetTimestamp() - started, complexCount / block.Rate);
     }
+
+    /// <summary>
+    /// Publishes, once a second, how much of a core each side costs per second of signal:
+    /// the decoder thread, and what is left on SDR#'s IQ thread. Above 100% the decoder
+    /// cannot keep up in real time on this machine; the dropped-block count says so too.
+    /// </summary>
+    private void AccountLoad(long decodeTicks, double signalSeconds)
+    {
+        _decodeTicks += decodeTicks;
+        _accountedSignalSeconds += signalSeconds;
+        var now = Stopwatch.GetTimestamp();
+        if (now - _loadWindowStart < Stopwatch.Frequency || _accountedSignalSeconds <= 0) return;
+        _loadWindowStart = now;
+
+        var signal = _accountedSignalSeconds;
+        var decoder = (float)(_decodeTicks / (double)Stopwatch.Frequency / signal);
+        var iqThread = (float)(Interlocked.Exchange(ref _iqThreadTicks, 0) / (double)Stopwatch.Frequency / signal);
+        _decodeTicks = 0;
+        _accountedSignalSeconds = 0;
+        // The first window holds JIT compilation and the queue's first allocations against a
+        // single block of signal: measured live at 200%, which says nothing about steady state.
+        if (++_loadWindows == 1) return;
+        var dropped = _iqQueue.Dropped;
+        UpdateStatus(s => s with { DecoderLoad = decoder, IqThreadLoad = iqThread, DroppedBlocks = dropped });
+        if (MetadataTrace.Enabled && _loadWindows % 10 == 2)
+            MetadataTrace.Write($"LOAD decoder thread {MetadataTrace.CurrentOsThreadId()}: {decoder * 100:0.0}% of a core; " +
+                                $"SDR# IQ thread: {iqThread * 100:0.000}%; dropped blocks {dropped}");
+    }
+
 
     /// <summary>
     /// Where HD audio replaces the analog programme, by overwriting SDR#'s buffer in place.
@@ -429,6 +561,8 @@ internal sealed class Nrsc5Engine : IDisposable
     /// </summary>
     public unsafe void ProcessAudio(float* buffer, int length)
     {
+        // First, and outside every lock: release any metadata whose audio is now playing.
+        PresentDueTracks();
         if (!Enabled || !ReplaceAnalogAudio || !Status.Synced || length < 2) return;
 
         var outputRate = OutputSampleRate;
@@ -526,6 +660,14 @@ internal sealed class Nrsc5Engine : IDisposable
         }
         _fccDirectory.Dispose();
         _geocoder.Dispose();
+
+        // The session is closed, so the decoder has nothing left to feed. Wake it so it
+        // notices it is being stopped instead of waiting out its poll.
+        _decoderStopping = true;
+        _iqQueue.Clear();
+        _iqQueue.Wake();
+        _decoderThread?.Join(2000);
+        _iqQueue.Dispose();
     }
 
     /// <summary>
@@ -555,6 +697,7 @@ internal sealed class Nrsc5Engine : IDisposable
 
                 Nrsc5Native.nrsc5_start(state);
                 _session = state;
+                EnsureDecoderThread();
                 ResetIq();
                 ResetAudio();
                 ResetMetadata();
@@ -775,7 +918,7 @@ internal sealed class Nrsc5Engine : IDisposable
     /// Decoded PCM for one subchannel. Only the selected one is kept; the others are dropped
     /// here rather than buffered, because a station can carry three or four at once.
     /// </summary>
-    private void ReceiveAudio(IntPtr union)
+    private unsafe void ReceiveAudio(IntPtr union)
     {
         var program = Marshal.ReadInt32(union, Nrsc5Layout.AudioProgram);
         MarkProgramAvailable(program);
@@ -783,16 +926,19 @@ internal sealed class Nrsc5Engine : IDisposable
         var data = Marshal.ReadIntPtr(union, Nrsc5Layout.AudioData);
         var count = ReadNativeSize(union, Nrsc5Layout.AudioCount);
         if (data == IntPtr.Zero || count <= 0 || count > 65536) return;
-        var pcm = new short[(int)count];
-        Marshal.Copy(data, pcm, 0, pcm.Length);
+        // The native buffer is valid during this callback; Write copies/converts it
+        // synchronously, so no temporary managed array or Marshal.Copy is needed.
+        var pcm = new ReadOnlySpan<short>((void*)data, (int)count);
         Volatile.Write(ref _lastDigitalTicks, Stopwatch.GetTimestamp());
         _audio.Write(pcm);
     }
 
     /// <summary>
-    /// Song metadata, and the XHDR that says which LOT image belongs to the track playing.
-    /// The XHDR is remembered per subchannel: a lot id only means something within its own
-    /// service, so one station's HD2 art would otherwise land on HD1.
+    /// Song metadata and the XHDR that says which image goes with it. The frame is not
+    /// shown on arrival: it is stamped with the prebuffer position of the audio decoded
+    /// alongside it and released when that audio is heard. The XHDR parameter is honoured
+    /// too: 1 means this track has no image, and a repeat of the same track without an
+    /// XHDR keeps the reference it already had.
     /// </summary>
     private void ReceiveId3(IntPtr union)
     {
@@ -804,20 +950,86 @@ internal sealed class Nrsc5Engine : IDisposable
         var artist = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.Id3Artist));
         var album = ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.Id3Album));
         var mime = unchecked((uint)Marshal.ReadInt32(union, Nrsc5Layout.Id3XhdrMime));
+        var param = Marshal.ReadInt32(union, Nrsc5Layout.Id3XhdrParam);
         var lot = Marshal.ReadInt32(union, Nrsc5Layout.Id3XhdrLot);
+        var xhdr = XhdrReference.FromNative(mime, param, lot);
 
+        long lotStamp;
         lock (_artworkGate)
         {
-            // The XHDR carries no port, so match the lot id against any port already
-            // cached for this program before falling back to a port-agnostic entry.
-            _xhdrByProgram[program] = lot >= 0 && Nrsc5Mime.IsImage(mime) ? (-1, lot) : (-1, -1);
+            if (xhdr.Directive == ArtworkDirective.Show) _programLinksImages[program] = true;
+            lotStamp = _lotSequence;
         }
 
-        if (program == SelectedProgram)
-            UpdateStatus(s => s with { Title = title, Artist = artist, Album = album });
+        // The audio decoded with this frame sits at the prebuffer's current write position.
+        var position = _audio.TotalWrittenFrames;
+        TrackInfo track;
+        TrackInfo? previous;
+        bool presentNow;
+        lock (_trackGate)
+        {
+            previous = _receivedTracks[program];
+            track = TrackInfo.Merge(previous, new TrackInfo(program, title, artist, album, xhdr, lotStamp));
+            _receivedTracks[program] = track;
+            // Only the selected program's audio goes through the prebuffer. Any other
+            // program is not being heard, so there is nothing to wait for.
+            presentNow = program != SelectedProgram || !ReplaceAnalogAudio;
+            if (!presentNow) _pendingTracks.Enqueue(position, Stopwatch.GetTimestamp(), track);
+        }
+
+        // Stations repeat the same frame every second or two; only a change is worth a line.
+        if (MetadataTrace.Enabled && (!track.IsSameTrackAs(previous) || track.Xhdr != previous!.Xhdr))
+            MetadataTrace.Write($"ID3  HD{program + 1} \"{title}\" / \"{artist}\" xhdr={xhdr.Directive}:{xhdr.Lot} (param {param}) " +
+                                $"at frame {position}, {(presentNow ? "shown now" : "queued")}");
+        if (presentNow) PresentTrack(track);
+    }
+
+    /// <summary>
+    /// Releases the newest queued track whose audio playback has reached. Called from the
+    /// audio callback, so it is cheap when nothing is waiting and takes no lock across the
+    /// presentation itself.
+    /// </summary>
+    private void PresentDueTracks()
+    {
+        lock (_trackGate)
+        {
+            if (_pendingTracks.Count == 0) return;
+        }
+
+        // With HD audio not replacing the analog programme, nothing consumes the
+        // prebuffer, so everything waiting is due now.
+        var consumed = ReplaceAnalogAudio ? _audio.TotalConsumedFrames : long.MaxValue;
+        TrackInfo? due = null;
+        lock (_trackGate)
+        {
+            if (_pendingTracks.TryTakeDue(consumed, Stopwatch.GetTimestamp(), MaxPresentationDelayTicks, out var track))
+                due = track;
+        }
+        if (due is not null) PresentTrack(due);
+    }
+
+    /// <summary>Makes a track the one being heard on its program, and shows it if that program is selected.</summary>
+    private void PresentTrack(TrackInfo track)
+    {
+        TrackInfo? before;
+        lock (_trackGate)
+        {
+            before = _presentedTracks[track.Program];
+            _presentedTracks[track.Program] = track;
+        }
+        if (MetadataTrace.Enabled && (!track.IsSameTrackAs(before) || track.Xhdr != before!.Xhdr))
+            MetadataTrace.Write($"SHOW HD{track.Program + 1} \"{track.Title}\" / \"{track.Artist}\" xhdr={track.Xhdr.Directive}:{track.Xhdr.Lot} " +
+                                $"(heard at frame {_audio.TotalConsumedFrames})");
+        if (track.Program != SelectedProgram) return;
+        UpdateStatus(s => s with { Title = track.Title, Artist = track.Artist, Album = track.Album });
         RefreshArtwork();
     }
 
+    /// <summary>
+    /// A LOT object: album art or a station logo. Every image is cached with its port, its
+    /// program when libnrsc5 knows it, and an arrival number. Which one is shown is decided
+    /// later, from the track being heard, never simply from which image came in last.
+    /// </summary>
     private void ReceiveLot(IntPtr union)
     {
         var port = Marshal.ReadInt16(union, Nrsc5Layout.LotPort) & 0xFFFF;
@@ -837,40 +1049,140 @@ internal sealed class Nrsc5Engine : IDisposable
         var bytes = new byte[size];
         Marshal.Copy(data, bytes, 0, size);
         var program = ProgramFromService(Marshal.ReadIntPtr(union, Nrsc5Layout.LotService));
+        var component = Marshal.ReadIntPtr(union, Nrsc5Layout.LotComponent);
+        var componentMime = component != IntPtr.Zero
+            ? unchecked((uint)Marshal.ReadInt32(component, Nrsc5Layout.SigComponentDataMime))
+            : 0u;
 
-        lock (_artworkGate)
+        // Images the tracks still point at must survive eviction, or a long listening
+        // session could throw away the cover of the very song that is playing.
+        var protectedLots = new HashSet<int>();
+        lock (_trackGate)
         {
-            if (_lotImages.Count >= MaxCachedImages && !_lotImages.ContainsKey((port, lot)))
-                _lotImages.Remove(_lotImages.Keys.First());
-            _lotImages[(port, lot)] = new CachedImage(bytes, mime, program);
-
-            if (mime == Nrsc5Mime.StationLogo)
-            {
-                // A station logo is never referenced by an ID3 XHDR. Keeping it only in
-                // the lot cache is why it used to arrive and never appear on screen.
-                if (program >= 0) _stationLogoByProgram[program] = bytes;
-                else _stationLogo = bytes;
-            }
-            else if (program >= 0)
-            {
-                _latestArtByProgram[program] = bytes;
-            }
-            else
-            {
-                // No SIG binding yet: assume it belongs to the program being listened to.
-                _latestArtByProgram[SelectedProgram] = bytes;
-            }
+            foreach (var track in _receivedTracks) if (track?.Xhdr.Directive == ArtworkDirective.Show) protectedLots.Add(track.Xhdr.Lot);
+            foreach (var track in _presentedTracks) if (track?.Xhdr.Directive == ArtworkDirective.Show) protectedLots.Add(track.Xhdr.Lot);
         }
 
+        bool isLogo;
+        lock (_artworkGate)
+        {
+            if (program < 0 && _portProgram.TryGetValue(port, out var mapped)) program = mapped;
+            var image = new CachedImage(bytes, mime, componentMime, program, ++_lotSequence);
+            _lotImages[(port, lot)] = image;
+            isLogo = IsLogoLocked((port, lot), image);
+            TrimLotCacheLocked(protectedLots);
+        }
+
+        if (MetadataTrace.Enabled)
+            MetadataTrace.Write($"LOT  port {port} lot {lot} {(isLogo ? "logo" : "image")} mime {mime:X8} component {componentMime:X8} " +
+                                $"\"{ReadUtf8(Marshal.ReadIntPtr(union, Nrsc5Layout.LotName))}\" {size} bytes, " +
+                                $"program {(program >= 0 ? $"HD{program + 1}" : "unknown")}");
         RefreshArtwork();
     }
 
+    /// <summary>Caller holds <see cref="_artworkGate"/>. Evicts oldest first, sparing referenced images and logos.</summary>
+    private void TrimLotCacheLocked(HashSet<int> protectedLots)
+    {
+        while (_lotImages.Count > MaxCachedImages)
+        {
+            (int Port, int Lot)? victim = null;
+            var oldest = long.MaxValue;
+            foreach (var (key, image) in _lotImages)
+            {
+                if (protectedLots.Contains(key.Lot) || IsLogoLocked(key, image)) continue;
+                if (image.Sequence < oldest) { oldest = image.Sequence; victim = key; }
+            }
+            if (victim is null)
+            {
+                // Everything is protected: fall back to plain oldest-first.
+                foreach (var (key, image) in _lotImages)
+                    if (image.Sequence < oldest) { oldest = image.Sequence; victim = key; }
+            }
+            _lotImages.Remove(victim!.Value);
+        }
+    }
+
     /// <summary>
-    /// Walks the SIG linked list to learn which subchannels exist. Pointers are only
-    /// valid for the duration of the callback, so everything needed is copied here.
+    /// Caller holds <see cref="_artworkGate"/>. Whether an image is a station logo: by its own
+    /// MIME type, by the SIG component it arrived on, or by what the SIG says its port carries.
+    /// Decided at lookup rather than on arrival, so a logo that beat the SIG table in is
+    /// recognised as soon as the table turns up.
+    /// </summary>
+    private bool IsLogoLocked((int Port, int Lot) key, CachedImage image) =>
+        image.Mime == Nrsc5Mime.StationLogo ||
+        image.ComponentMime == Nrsc5Mime.StationLogo ||
+        _portMime.GetValueOrDefault(key.Port) == Nrsc5Mime.StationLogo;
+
+    private static string DescribeMime(uint mime) => mime switch
+    {
+        Nrsc5Mime.StationLogo => "station logo",
+        Nrsc5Mime.PrimaryImage => "primary image",
+        _ => $"MIME {mime:X8}"
+    };
+
+    /// <summary>Caller holds <see cref="_artworkGate"/>. The program an image belongs to, from its service or its port.</summary>
+    private int OwnerLocked((int Port, int Lot) key, CachedImage image) =>
+        image.Program >= 0 ? image.Program : _portProgram.GetValueOrDefault(key.Port, -1);
+
+    /// <summary>
+    /// Caller holds <see cref="_artworkGate"/>. The image an XHDR names. LOT ids repeat
+    /// across ports, so an image owned by another program never qualifies; one whose owner
+    /// is still unknown does, if nothing better exists.
+    /// </summary>
+    private byte[]? FindReferencedLocked(int program, int lot)
+    {
+        byte[]? unowned = null;
+        var unownedSequence = -1L;
+        foreach (var (key, image) in _lotImages)
+        {
+            if (key.Lot != lot) continue;
+            var owner = OwnerLocked(key, image);
+            if (owner == program) return image.Bytes;
+            if (owner < 0 && image.Sequence > unownedSequence) { unowned = image.Bytes; unownedSequence = image.Sequence; }
+        }
+        return unowned;
+    }
+
+    /// <summary>
+    /// Caller holds <see cref="_artworkGate"/>. The newest logo for this program, else the
+    /// newest one whose owner is unknown. Never another program's: on a multicast station
+    /// HD2 is often a different brand, and borrowing HD1's logo would label it wrongly.
+    /// </summary>
+    private byte[]? FindLogoLocked(int program)
+    {
+        byte[]? own = null, unowned = null;
+        long ownSequence = -1, unownedSequence = -1;
+        foreach (var (key, image) in _lotImages)
+        {
+            if (!IsLogoLocked(key, image)) continue;
+            var owner = OwnerLocked(key, image);
+            if (owner == program && image.Sequence > ownSequence) { own = image.Bytes; ownSequence = image.Sequence; }
+            else if (owner < 0 && image.Sequence > unownedSequence) { unowned = image.Bytes; unownedSequence = image.Sequence; }
+        }
+        return own ?? unowned;
+    }
+
+    /// <summary>Caller holds <see cref="_artworkGate"/>. The newest non-logo image owned by this program.</summary>
+    private (byte[]? Bytes, long Sequence) FindLatestArtLocked(int program)
+    {
+        byte[]? bytes = null;
+        var sequence = -1L;
+        foreach (var (key, image) in _lotImages)
+        {
+            if (IsLogoLocked(key, image) || OwnerLocked(key, image) != program) continue;
+            if (image.Sequence > sequence) { bytes = image.Bytes; sequence = image.Sequence; }
+        }
+        return (bytes, sequence);
+    }
+
+    /// <summary>
+    /// Walks the SIG linked list to learn which subchannels exist and which data ports
+    /// belong to each. Pointers are only valid for the duration of the callback, so
+    /// everything needed is copied here.
     /// </summary>
     private void ReceiveSig(IntPtr union)
     {
+        var ports = new List<(int Port, int Program, uint Mime)>();
         var service = Marshal.ReadIntPtr(union, Nrsc5Layout.SigServices);
         var guard = 0;
         while (service != IntPtr.Zero && guard++ < 64)
@@ -878,10 +1190,43 @@ internal sealed class Nrsc5Engine : IDisposable
             var type = Marshal.ReadByte(service, Nrsc5Layout.SigServiceType);
             var number = Marshal.ReadInt16(service, Nrsc5Layout.SigServiceNumber) & 0xFFFF;
             var audioComponent = Marshal.ReadIntPtr(service, Nrsc5Layout.SigServiceAudioComponent);
-            if (type == Nrsc5SigServiceType.Audio && audioComponent != IntPtr.Zero)
-                MarkProgramAvailable(number - 1);
+            if (type == Nrsc5SigServiceType.Audio)
+            {
+                var program = number - 1;
+                if (audioComponent != IntPtr.Zero) MarkProgramAvailable(program);
+
+                // The data components of an audio service carry that program's images.
+                var component = Marshal.ReadIntPtr(service, Nrsc5Layout.SigServiceComponents);
+                var inner = 0;
+                while (component != IntPtr.Zero && inner++ < 32 && program is >= 0 and <= 7)
+                {
+                    if (Marshal.ReadByte(component, Nrsc5Layout.SigComponentType) == Nrsc5SigComponentType.Data)
+                        ports.Add((Marshal.ReadInt16(component, Nrsc5Layout.SigComponentDataPort) & 0xFFFF, program,
+                            unchecked((uint)Marshal.ReadInt32(component, Nrsc5Layout.SigComponentDataMime))));
+                    component = Marshal.ReadIntPtr(component, Nrsc5Layout.SigComponentNext);
+                }
+            }
             service = Marshal.ReadIntPtr(service, Nrsc5Layout.SigServiceNext);
         }
+
+        if (ports.Count == 0) return;
+        var changed = false;
+        lock (_artworkGate)
+        {
+            foreach (var (port, program, mime) in ports)
+            {
+                if (_portProgram.TryGetValue(port, out var known) && known == program &&
+                    _portMime.GetValueOrDefault(port) == mime) continue;
+                _portProgram[port] = program;
+                _portMime[port] = mime;
+                changed = true;
+            }
+        }
+        if (changed && MetadataTrace.Enabled)
+            foreach (var (port, program, mime) in ports)
+                MetadataTrace.Write($"SIG  port {port} -> HD{program + 1} carries {DescribeMime(mime)}");
+        // Images that arrived before the SIG may just have found their owner.
+        if (changed) RefreshArtwork();
     }
 
     /// <summary>Maps a SIG service back to a 0-based program index, or -1 when unknown.</summary>
@@ -924,43 +1269,30 @@ internal sealed class Nrsc5Engine : IDisposable
     }
 
     /// <summary>
-    /// Resolves what to show for the selected program, most specific first: the image the
-    /// current ID3 XHDR points at, then the most recent album art seen on this program,
-    /// then the station logo. Stations that broadcast art without a matching XHDR, and
-    /// station logos that are never referenced at all, both used to fall through to
-    /// nothing at all.
+    /// Decides the artwork for the track being heard on the selected program. The rules
+    /// live in <see cref="ArtworkResolver"/>; this only gathers what they need. The one that
+    /// matters: an image from another track is never shown in place of a missing one.
     /// </summary>
     private void RefreshArtwork()
     {
         var program = SelectedProgram;
-        byte[]? chosen;
-        var isLogo = false;
+        TrackInfo? track;
+        lock (_trackGate) track = _presentedTracks[program];
 
+        ArtworkChoice choice;
         lock (_artworkGate)
         {
-            chosen = null;
-            var (_, lot) = _xhdrByProgram[program];
-            if (lot >= 0)
-            {
-                foreach (var entry in _lotImages)
-                {
-                    if (entry.Key.Lot != lot) continue;
-                    if (entry.Value.Program >= 0 && entry.Value.Program != program) continue;
-                    chosen = entry.Value.Bytes;
-                    break;
-                }
-            }
-
-            chosen ??= _latestArtByProgram[program];
-            if (chosen is null)
-            {
-                chosen = _stationLogoByProgram[program] ?? _stationLogo;
-                isLogo = chosen is not null;
-            }
+            var xhdr = track?.Xhdr ?? XhdrReference.Absent;
+            var referenced = xhdr.Directive == ArtworkDirective.Show ? FindReferencedLocked(program, xhdr.Lot) : null;
+            var latest = FindLatestArtLocked(program);
+            var sinceTrackStart = track is not null && latest.Sequence > track.LotStamp ? latest.Bytes : null;
+            choice = ArtworkResolver.Resolve(xhdr, _programLinksImages[program], referenced, sinceTrackStart, FindLogoLocked(program));
         }
 
-        var logo = isLogo;
-        UpdateStatus(s => s with { Artwork = chosen, ArtworkIsStationLogo = logo });
+        if (MetadataTrace.Enabled && !ReferenceEquals(choice.Image, Interlocked.Exchange(ref _tracedArtwork, choice.Image)))
+            MetadataTrace.Write($"ART  HD{program + 1} -> {(choice.Image is null ? "placeholder" : choice.IsStationLogo ? "station logo" : $"image {choice.Image.Length} bytes")} " +
+                                $"for \"{track?.Title}\"");
+        UpdateStatus(s => s with { Artwork = choice.Image, ArtworkIsStationLogo = choice.IsStationLogo });
     }
 
     private static bool LooksLikeImage(byte[] data) =>
@@ -1323,18 +1655,22 @@ internal sealed class Nrsc5Engine : IDisposable
     }
 
     /// <summary>
-    /// Drops the resampler and mixer state. Their history belongs to the old signal, and
-    /// carrying it across a retune would put a burst of noise into the first decoded block.
+    /// Drops the resampler and mixer state and everything still queued for the decoder.
+    /// Their history belongs to the old signal, and carrying it across a retune would put
+    /// a burst of noise into the first decoded block. The generation bump turns away the
+    /// one block the decoder may already be holding.
     /// </summary>
     private void ResetIq()
     {
         lock (_iqGate)
         {
+            Interlocked.Increment(ref _iqGeneration);
             _resampler.Reset();
-            _ncoPhase = 0;
+            _mixer.Reset();
             _smoothedDbfs = -120;
             _lastSignalTicks = 0;
         }
+        _iqQueue.Clear();
     }
 
     /// <summary>
@@ -1438,18 +1774,23 @@ internal sealed class Nrsc5Engine : IDisposable
     }
 
     /// <summary>
-    /// Forgets everything the previous station said about itself: artwork caches, the XHDR
-    /// map and the subchannel line-up.
+    /// Forgets everything the previous station said about itself: artwork, the port map,
+    /// every track decoded or waiting to be shown, and the subchannel line-up.
     /// </summary>
     private void ResetMetadata()
     {
         lock (_artworkGate)
         {
             _lotImages.Clear();
-            Array.Fill(_xhdrByProgram, (-1, -1));
-            Array.Clear(_latestArtByProgram);
-            Array.Clear(_stationLogoByProgram);
-            _stationLogo = null;
+            _portProgram.Clear();
+            _portMime.Clear();
+            Array.Clear(_programLinksImages);
+        }
+        lock (_trackGate)
+        {
+            Array.Clear(_receivedTracks);
+            Array.Clear(_presentedTracks);
+            _pendingTracks.Clear();
         }
         Volatile.Write(ref _programMask, 0);
         ResetBitrate();

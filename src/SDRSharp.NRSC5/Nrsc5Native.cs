@@ -104,6 +104,13 @@ internal static class Nrsc5SigServiceType
     internal const int Data = 1;
 }
 
+/// <summary>A component within a SIG service: its audio stream, or a data port such as its images.</summary>
+internal static class Nrsc5SigComponentType
+{
+    internal const int Audio = 0;
+    internal const int Data = 1;
+}
+
 /// <summary>Which HERE map a <c>here_image</c> event carries.</summary>
 internal static class Nrsc5HereImage
 {

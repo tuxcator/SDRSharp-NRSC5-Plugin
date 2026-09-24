@@ -45,8 +45,11 @@ Captured with an Airspy HF+ Discovery at 912 ksps. The `Device SN` field is mask
 - Digitally centres the selected VFO and resamples to 744187.5 complex samples per second.
 - Feeds `libnrsc5` through `nrsc5_open_pipe` and `nrsc5_pipe_samples_cf32`.
 - Reports lock state, MER, BER, station name, title, artist and album.
-- Receives and displays song artwork and the station logo from ID3/XHDR events and LOT files, with a
-  priority fallback for stations that never send an XHDR.
+- Receives and displays song artwork and the station logo from ID3/XHDR events and LOT files. The
+  title and the artwork change when the song is heard, not when it is decoded, and a missing cover
+  shows the subchannel's logo rather than the previous song's.
+- Decodes on a thread of its own: SDR#'s IQ callback only hands the block over, so HD decoding never
+  competes with SDR#'s own signal processing.
 - Replaces the analog audio with HD PCM while locked, and returns to analog when the signal is lost.
 - Optional HD audio buffer, adjustable in seconds, with a fill indicator.
 - Professional monitor: dBFS power, calibrated dBm estimate, SNR/MER, per-sideband MER, BER and the
