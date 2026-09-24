@@ -1,5 +1,4 @@
-using System.Runtime.Intrinsics;
-
+// Frozen Dev 3.3.4 scalar baseline for numerical regression and throughput comparison.
 namespace SDRSharp.NRSC5;
 
 /// <summary>
@@ -14,7 +13,7 @@ namespace SDRSharp.NRSC5;
 /// Callers must mix the wanted carrier down to DC *before* resampling, otherwise the
 /// filter removes the very signal being tuned.
 /// </summary>
-internal sealed class PolyphaseResampler
+internal sealed class ReferenceResampler
 {
     private const int Phases = 512;
     private const double KaiserBeta = 8.6;
@@ -28,7 +27,6 @@ internal sealed class PolyphaseResampler
     private const int MaxTaps = 160;
 
     private float[] _bank = Array.Empty<float>();
-    private float[] _pairedBank = Array.Empty<float>();
     private int _taps;
     private int _leftWing;
     private int _rightWing;
@@ -61,12 +59,6 @@ internal sealed class PolyphaseResampler
         if (_bank.Length < Phases * _taps) _bank = new float[Phases * _taps];
 
         BuildBank(Math.Min(1.0, outputRate / inputRate) * 0.45);
-        if (Vector256.IsHardwareAccelerated)
-        {
-            _pairedBank = new float[Phases * _taps * 2];
-            for (var i = 0; i < Phases * _taps; i++)
-                _pairedBank[i * 2] = _pairedBank[i * 2 + 1] = _bank[i];
-        }
         Reset();
     }
 
@@ -118,22 +110,7 @@ internal sealed class PolyphaseResampler
             var coefficients = phase * _taps;
             var start = (baseIndex - _leftWing) * 2;
             float real = 0, imag = 0;
-            var tap = 0;
-            if (Vector256.IsHardwareAccelerated)
-            {
-                // Duplicate each coefficient for I/Q: four complex taps per vector,
-                // without deinterleaving the input or changing the filter response.
-                var sum = Vector256<float>.Zero;
-                for (; tap <= _taps - 4; tap += 4)
-                {
-                    var h = Vector256.LoadUnsafe(ref _pairedBank[0], (nuint)((coefficients + tap) * 2));
-                    var iq = Vector256.LoadUnsafe(ref _work[0], (nuint)(start + tap * 2));
-                    sum += h * iq;
-                }
-                real = sum.GetElement(0) + sum.GetElement(2) + sum.GetElement(4) + sum.GetElement(6);
-                imag = sum.GetElement(1) + sum.GetElement(3) + sum.GetElement(5) + sum.GetElement(7);
-            }
-            for (; tap < _taps; tap++)
+            for (var tap = 0; tap < _taps; tap++)
             {
                 var h = _bank[coefficients + tap];
                 real += h * _work[start + tap * 2];

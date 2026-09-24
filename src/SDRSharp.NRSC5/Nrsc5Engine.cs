@@ -91,7 +91,7 @@ internal sealed class Nrsc5Engine : IDisposable
     private double _inputSampleRate;
     private double _outputSampleRate;
     private double _tuningOffset;
-    private double _ncoPhase;
+    private readonly IqMixer _mixer = new();
     private float[] _mixed = new float[65536];
     private float[] _iqOutput = new float[65536];
     private bool _haveAudioPair;
@@ -405,19 +405,8 @@ internal sealed class Nrsc5Engine : IDisposable
     /// </summary>
     private unsafe void MixToBaseband(Complex* input, int length, double inputRate)
     {
-        var phaseStep = -2.0 * Math.PI * Volatile.Read(ref _tuningOffset) / inputRate;
-        for (var index = 0; index < length; index++)
-        {
-            var i = input[index].Real;
-            var q = input[index].Imag;
-            var cos = (float)Math.Cos(_ncoPhase);
-            var sin = (float)Math.Sin(_ncoPhase);
-            _mixed[index * 2] = i * cos - q * sin;
-            _mixed[index * 2 + 1] = i * sin + q * cos;
-            _ncoPhase += phaseStep;
-            if (_ncoPhase > Math.PI) _ncoPhase -= 2 * Math.PI;
-            else if (_ncoPhase < -Math.PI) _ncoPhase += 2 * Math.PI;
-        }
+        var iq = MemoryMarshal.Cast<Complex, float>(new ReadOnlySpan<Complex>(input, length));
+        _mixer.Process(iq, _mixed, Volatile.Read(ref _tuningOffset), inputRate);
     }
 
     /// <summary>
@@ -775,7 +764,7 @@ internal sealed class Nrsc5Engine : IDisposable
     /// Decoded PCM for one subchannel. Only the selected one is kept; the others are dropped
     /// here rather than buffered, because a station can carry three or four at once.
     /// </summary>
-    private void ReceiveAudio(IntPtr union)
+    private unsafe void ReceiveAudio(IntPtr union)
     {
         var program = Marshal.ReadInt32(union, Nrsc5Layout.AudioProgram);
         MarkProgramAvailable(program);
@@ -783,8 +772,9 @@ internal sealed class Nrsc5Engine : IDisposable
         var data = Marshal.ReadIntPtr(union, Nrsc5Layout.AudioData);
         var count = ReadNativeSize(union, Nrsc5Layout.AudioCount);
         if (data == IntPtr.Zero || count <= 0 || count > 65536) return;
-        var pcm = new short[(int)count];
-        Marshal.Copy(data, pcm, 0, pcm.Length);
+        // The native buffer is valid during this callback; Write copies/converts it
+        // synchronously, so no temporary managed array or Marshal.Copy is needed.
+        var pcm = new ReadOnlySpan<short>((void*)data, (int)count);
         Volatile.Write(ref _lastDigitalTicks, Stopwatch.GetTimestamp());
         _audio.Write(pcm);
     }
@@ -1331,7 +1321,7 @@ internal sealed class Nrsc5Engine : IDisposable
         lock (_iqGate)
         {
             _resampler.Reset();
-            _ncoPhase = 0;
+            _mixer.Reset();
             _smoothedDbfs = -120;
             _lastSignalTicks = 0;
         }

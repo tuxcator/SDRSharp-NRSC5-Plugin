@@ -58,25 +58,32 @@ internal sealed class PcmRingBuffer
     /// than keeping every sample. Dropping is done a frame at a time so the left and
     /// right channels can never come apart.
     /// </summary>
-    public void Write(short[] source)
+    public void Write(ReadOnlySpan<short> source)
     {
+        // Ignore an incomplete trailing stereo frame, preserving channel alignment.
+        source = source[..(source.Length & ~1)];
         lock (_gate)
         {
             var required = Math.Min(source.Length, _samples.Length);
-            while (_count + required > _samples.Length)
+            var dropped = Math.Max(0, _count + required - _samples.Length);
+            if (dropped > 0)
             {
-                _read = (_read + 2) % _samples.Length;
-                _count = Math.Max(0, _count - 2);
+                _read = (_read + dropped) % _samples.Length;
+                _count -= dropped;
             }
 
-            var start = Math.Max(0, source.Length - required);
-            for (var i = start; i < source.Length; i++)
-            {
-                _samples[_write] = source[i] / 32768f;
-                _write = (_write + 1) % _samples.Length;
-                if (_count < _samples.Length) _count++;
-            }
+            source = source[^required..];
+            var first = Math.Min(required, _samples.Length - _write);
+            Convert(source[..first], _samples.AsSpan(_write, first));
+            Convert(source[first..], _samples.AsSpan(0, required - first));
+            _write = (_write + required) % _samples.Length;
+            _count += required;
         }
+    }
+
+    private static void Convert(ReadOnlySpan<short> source, Span<float> destination)
+    {
+        for (var i = 0; i < source.Length; i++) destination[i] = source[i] * (1f / 32768f);
     }
 
     /// <summary>
@@ -94,9 +101,9 @@ internal sealed class PcmRingBuffer
             }
 
             left = _samples[_read];
-            _read = (_read + 1) % _samples.Length;
-            right = _samples[_read];
-            _read = (_read + 1) % _samples.Length;
+            right = _samples[_read + 1];
+            _read += 2;
+            if (_read == _samples.Length) _read = 0;
             _count -= 2;
             return true;
         }

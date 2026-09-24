@@ -2,6 +2,22 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
+## Unreleased — development build 3.3.5
+
+- **Lower IQ processing CPU cost.** The resampler evaluates four complex taps per
+  256-bit vector where supported, with a scalar fallback. The 512 phases, Kaiser
+  window and tap counts are preserved.
+- A periodically normalized complex oscillator replaces per-sample sine/cosine in
+  the mixer. Phase survives spectrum recentering; zero offset with unity phase uses
+  a direct copy.
+- PCM is converted directly from the native callback buffer without a temporary
+  array, and ring writes no longer perform a remainder operation per sample.
+- DSP regression checks now run during packaging: numerical accuracy, stream
+  continuity, anti-alias rejection, oscillator phase and PCM ordering. See
+  [measurements and reproduction commands (Spanish)](docs/RENDIMIENTO.md).
+  Throughput measurements cover IQ processing, not station acquisition time or
+  libnrsc5's internal decoding.
+
 ## Unreleased — development build 3.3.4
 
 - **Traffic and weather maps, and emergency alerts, in a window of their own.** Two new

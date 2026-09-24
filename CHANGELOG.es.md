@@ -2,6 +2,21 @@
 
 *[English version](CHANGELOG.md)*
 
+## Sin publicar — compilación de desarrollo 3.3.5
+
+- **Menor coste de CPU en la ruta IQ.** El remuestreador procesa cuatro coeficientes
+  complejos por vector de 256 bits cuando el procesador lo admite, con ruta escalar
+  de respaldo. Conserva las 512 fases, la ventana Kaiser y el número de coeficientes.
+- El mezclador usa un oscilador complejo con normalización periódica en lugar de
+  seno y coseno por muestra. Mantiene la fase al recentrar el espectro y copia
+  directamente el IQ cuando el oscilador está en fase cero y no hay desplazamiento.
+- El audio PCM se convierte directamente desde el búfer nativo durante el callback,
+  sin crear un array temporal; la escritura circular elimina el módulo por muestra.
+- Nuevas pruebas DSP de precisión, continuidad, rechazo antialias, fase y audio,
+  integradas en la compilación. [Mediciones y reproducción](docs/RENDIMIENTO.md).
+  Las mejoras medidas corresponden al procesamiento IQ, no al tiempo de sincronización
+  de una emisora ni a la decodificación interna de libnrsc5.
+
 ## Sin publicar — compilación de desarrollo 3.3.4
 
 - **Mapas de tráfico y clima, y alertas de emergencia, en una ventana propia.** Dos
