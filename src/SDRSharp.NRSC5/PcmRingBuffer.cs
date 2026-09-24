@@ -19,6 +19,14 @@ internal sealed class PcmRingBuffer
     private int _write;
     private int _count;
 
+    // Running totals in frames since the ring was created. Written minus consumed is always
+    // what the ring holds, so a position stamped at write time tells exactly when that
+    // audio reaches the speakers: once consumed has caught up with it. Consumed counts
+    // everything that left the ring, played or dropped, so a skipped frame cannot leave a
+    // stamp waiting for a position that playback will never pass through.
+    private long _totalWritten;
+    private long _totalConsumed;
+
     public PcmRingBuffer(int frames)
     {
         _samples = new float[Capacity(frames)];
@@ -35,6 +43,18 @@ internal sealed class PcmRingBuffer
         get { lock (_gate) return _samples.Length / 2; }
     }
 
+    /// <summary>Frames ever written. Metadata decoded now belongs to the audio at this position.</summary>
+    public long TotalWrittenFrames
+    {
+        get { lock (_gate) return _totalWritten; }
+    }
+
+    /// <summary>Frames ever played or dropped: how far the listener has got.</summary>
+    public long TotalConsumedFrames
+    {
+        get { lock (_gate) return _totalConsumed; }
+    }
+
     /// <summary>
     /// Grows the ring so it can hold <paramref name="frames"/> stereo frames. Used when
     /// the user raises the audio buffer length; shrinking is not worth the discontinuity,
@@ -48,6 +68,7 @@ internal sealed class PcmRingBuffer
             if (_samples.Length >= wanted) return;
             _samples = new float[wanted];
             _read = _write = _count = 0;
+            _totalConsumed = _totalWritten;
         }
     }
 
@@ -71,6 +92,10 @@ internal sealed class PcmRingBuffer
                 _read = (_read + dropped) % _samples.Length;
                 _count -= dropped;
             }
+            // A block larger than the whole ring keeps only its tail; the head never
+            // enters, so it is written and consumed in the same breath.
+            _totalWritten += source.Length / 2;
+            _totalConsumed += (dropped + source.Length - required) / 2;
 
             source = source[^required..];
             var first = Math.Min(required, _samples.Length - _write);
@@ -105,6 +130,7 @@ internal sealed class PcmRingBuffer
             _read += 2;
             if (_read == _samples.Length) _read = 0;
             _count -= 2;
+            _totalConsumed++;
             return true;
         }
     }
@@ -115,6 +141,7 @@ internal sealed class PcmRingBuffer
         lock (_gate)
         {
             _read = _write = _count = 0;
+            _totalConsumed = _totalWritten;
         }
     }
 

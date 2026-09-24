@@ -17,5 +17,7 @@
     <Compile Include="..\..\src\SDRSharp.NRSC5\LookupCache.cs" />
     <Compile Include="..\..\src\SDRSharp.NRSC5\ReverseGeocoder.cs" />
     <Compile Include="..\..\src\SDRSharp.NRSC5\HereImages.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\TrackPresentation.cs" />
+    <Compile Include="..\..\src\SDRSharp.NRSC5\IqBlockQueue.cs" />
   </ItemGroup>
 </Project>

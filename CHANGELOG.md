@@ -2,6 +2,41 @@
 
 *[Versión en español](CHANGELOG.es.md)*
 
+## Unreleased — development build 4.0.0
+
+- **HD decoding leaves SDR#'s thread.** In pipe mode `libnrsc5` decodes inside
+  `nrsc5_pipe_samples_cf32`, and up to 3.3.5 that call was made from SDR#'s IQ callback,
+  so acquisition, Viterbi and the HDC codec competed with SDR#'s own processing. The
+  callback now only copies the block into a bounded queue of pooled buffers and returns;
+  mixer, resampler and `libnrsc5` run on a thread of their own, `NRSC-5 decoder`. Measured
+  live on an Airspy HF+ Discovery at 912 ksps: SDR#'s IQ thread goes from 16.3% to 5.2% of
+  a core, and the plugin's share of it drops to 0.3%. The process total does not change:
+  the work moves to another core, it does not disappear.
+- **Artwork follows the song that is playing.** Three causes, all seen live on XHTKR
+  103.7 MHz:
+  - When the right image had not arrived yet, the last image seen was shown, which
+    belonged to another song: a "LA KE BUENA / ESCUCHAS" station ID came up with a band
+    photo. The logo is now shown until the right image arrives.
+  - The XHDR parameter was ignored. 1 means "no image" and the station uses it for tracks
+    without a cover; 0 links a specific LOT. The XHDR is only trusted from a station that
+    links images at least once: some stations send 1 on everything.
+  - Title and artwork changed when decoded, ahead of the audio by the length of the buffer
+    (0.75 s by default, up to 10 s). They now change when that audio is heard: each ID3 is
+    stamped with its prebuffer position and released as playback reaches it.
+- **The right logo for each subchannel.** XHTKR sends its logos as plain JPEG and PNG
+  files (`SLXHTKR$020001.png`), not under the logo MIME type, so they were taken for album
+  art. A logo is now recognised by what the SIG table says its port carries. Images that
+  arrive before the SIG table are assigned to their subchannel by port as soon as the table
+  turns up, instead of sticking to whichever subchannel was selected.
+- **Resampler 1.1–1.3× faster than 3.3.5, and 1.75× at 2.4–4.8 MS/s.** The coefficient
+  bank is no longer duplicated: the bottleneck was memory, not arithmetic. Two
+  accumulators, FMA and a three-instruction horizontal reduction. Maximum error against
+  3.3.5: 3.6e-7.
+- The IQ line's tooltip shows the decoder thread's load and SDR#'s, measured by the plugin
+  itself, and any blocks dropped because the decoder fell behind.
+- Optional diagnostic trace of metadata and load, enabled by creating
+  `%LOCALAPPDATA%\SDRSharp.NRSC5\trace.enabled`. [Details and measurements](docs/RENDIMIENTO.md).
+
 ## Unreleased — development build 3.3.5
 
 - **Lower IQ processing CPU cost.** The resampler evaluates four complex taps per

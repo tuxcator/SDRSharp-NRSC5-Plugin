@@ -1,6 +1,6 @@
 namespace SDRSharp.NRSC5;
 
-/// <summary>A continuous complex oscillator, owned by the IQ thread.</summary>
+/// <summary>A continuous complex oscillator, owned by the decoder thread.</summary>
 internal sealed class IqMixer
 {
     private double _real = 1;

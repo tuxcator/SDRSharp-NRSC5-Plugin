@@ -10,5 +10,7 @@
     <Compile Include="../../src/SDRSharp.NRSC5/PolyphaseResampler.cs" />
     <Compile Include="../../src/SDRSharp.NRSC5/IqMixer.cs" />
     <Compile Include="../../src/SDRSharp.NRSC5/PcmRingBuffer.cs" />
+    <Compile Include="../../src/SDRSharp.NRSC5/IqBlockQueue.cs" />
+    <!-- Resampler335.cs lives here and is picked up by default: the 3.3.5 baseline. -->
   </ItemGroup>
 </Project>

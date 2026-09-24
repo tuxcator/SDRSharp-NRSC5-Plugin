@@ -55,6 +55,30 @@ foreach (var rate in rates)
 }
 Console.WriteLine($"[OK] Resampler vs Dev 3.3.4; max absolute error {maxFilterError:E3}; Vector256={Vector256.IsHardwareAccelerated}.");
 
+double maxPreviousError = 0;
+foreach (var rate in rates)
+{
+    var actual = new PolyphaseResampler();
+    var previous = new Resampler335();
+    actual.Configure(rate, outputRate);
+    previous.Configure(rate, outputRate);
+    float[] a = [], b = [];
+    for (var block = 0; block < 40; block++)
+    {
+        var count = (block % 5) switch { 0 => 1, 1 => 33, _ => random.Next(100, 32769) };
+        var na = actual.Process(input, count, ref a);
+        var nb = previous.Process(input, count, ref b);
+        Require(na == nb, $"Output count vs 3.3.5 at {rate}");
+        for (var i = 0; i < na * 2; i++)
+        {
+            var error = Math.Abs(a[i] - b[i]);
+            maxPreviousError = Math.Max(maxPreviousError, error);
+            Require(error < 2e-6, $"Filter error vs 3.3.5 at {rate}: {error}");
+        }
+    }
+}
+Console.WriteLine($"[OK] Resampler vs Dev 3.3.5; max absolute error {maxPreviousError:E3}; FMA={System.Runtime.Intrinsics.X86.Fma.IsSupported}.");
+
 // Check sample continuity independently of the original implementation's block handling.
 foreach (var rate in rates)
 {
@@ -118,6 +142,8 @@ for (var block = 0; block < 1000; block++)
         if (ok) Require(left == expected.Dequeue() / 32768f && right == expected.Dequeue() / 32768f, "PCM order/channels");
     }
     Require(ring.AvailableFrames == expected.Count / 2, "PCM occupancy");
+    // The metadata delay rests on this: written minus consumed is exactly what is waiting.
+    Require(ring.TotalWrittenFrames - ring.TotalConsumedFrames == ring.AvailableFrames, "PCM position counters");
 }
 Console.WriteLine("[OK] PCM conversion, wraparound, overflow, stereo alignment, clear and resize.");
 
@@ -126,30 +152,50 @@ allocationFilter.Configure(912000, outputRate);
 float[] allocationOutput = [];
 var pcmInput = new short[4096];
 for (var i = 0; i < 20; i++) allocationFilter.Process(input, input.Length / 2, ref allocationOutput);
+var iqQueue = new IqBlockQueue { MaxQueuedFloats = 1 << 22 };
+for (var i = 0; i < 4; i++)
+{
+    iqQueue.TryEnqueue(input, 912000, 0, 0);
+    iqQueue.TryDequeue(0, out var warm);
+    iqQueue.Return(warm.Buffer);
+}
 var before = GC.GetAllocatedBytesForCurrentThread();
 for (var i = 0; i < 50; i++)
 {
-    mixer.Process(input, mixed, 100000, 912000);
+    // The full per-block path of 4.0.0: queue on SDR#'s side, mix and resample on the decoder's.
+    iqQueue.TryEnqueue(input, 912000, 100000, 0);
+    iqQueue.TryDequeue(0, out var block);
+    mixer.Process(block.Buffer.AsSpan(0, block.Floats), mixed, 100000, 912000);
+    iqQueue.Return(block.Buffer);
     allocationFilter.Process(mixed, input.Length / 2, ref allocationOutput);
     ring.Write(pcmInput);
 }
 var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 Require(allocated == 0, $"Steady-state allocations: {allocated}");
-Console.WriteLine("[OK] Zero steady-state allocations in mixer, resampler and PCM writes.");
+Console.WriteLine("[OK] Zero steady-state allocations in the IQ queue, mixer, resampler and PCM writes.");
 
 if (args.Contains("--benchmark"))
 {
     Console.WriteLine($"Runtime: {RuntimeInformation.FrameworkDescription}; {RuntimeInformation.ProcessArchitecture}");
+    // Three generations side by side in one process, so the comparison does not depend on
+    // how busy the machine was when an older number was written down. The load column is
+    // the share of one core needed to keep up with the stream in real time, which is what
+    // actually matters: a block at 4.8 MS/s covers five times less signal than at 912 kS/s.
     foreach (var rate in rates)
     {
-        var optimized = new PolyphaseResampler();
+        var current = new PolyphaseResampler();
+        var previous = new Resampler335();
         var original = new ReferenceResampler();
-        optimized.Configure(rate, outputRate);
+        current.Configure(rate, outputRate);
+        previous.Configure(rate, outputRate);
         original.Configure(rate, outputRate);
-        float[] fastOutput = [], slowOutput = [];
-        var fast = Measure(() => optimized.Process(input, input.Length / 2, ref fastOutput));
-        var slow = Measure(() => original.Process(input, input.Length / 2, ref slowOutput));
-        Console.WriteLine($"Resampler {rate / 1000:F1} kS/s: original {slow:F3} ms/block, optimized {fast:F3} ms/block, {slow / fast:F2}x");
+        float[] currentOutput = [], previousOutput = [], originalOutput = [];
+        var now = Measure(() => current.Process(input, input.Length / 2, ref currentOutput));
+        var dev335 = Measure(() => previous.Process(input, input.Length / 2, ref previousOutput));
+        var dev334 = Measure(() => original.Process(input, input.Length / 2, ref originalOutput));
+        var signalMs = input.Length / 2 / rate * 1000;
+        Console.WriteLine($"Resampler {rate / 1000,6:F1} kS/s: 3.3.4 {dev334:F3}  3.3.5 {dev335:F3}  4.0.0 {now:F3} ms/block " +
+                          $"| {dev335 / now:F2}x vs 3.3.5 | load {dev335 / signalMs * 100:F2}% -> {now / signalMs * 100:F2}% of a core");
     }
     foreach (var offset in new double[] { 0, 157321.125 })
     {

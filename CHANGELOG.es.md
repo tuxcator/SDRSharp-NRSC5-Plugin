@@ -2,6 +2,41 @@
 
 *[English version](CHANGELOG.md)*
 
+## Sin publicar — compilación de desarrollo 4.0.0
+
+- **La decodificación HD sale del hilo de SDR#.** En modo *pipe*, `libnrsc5` decodifica
+  dentro de `nrsc5_pipe_samples_cf32`, y hasta la 3.3.5 esa llamada se hacía desde el
+  callback IQ de SDR#: la adquisición, el Viterbi y el códec HDC competían con el propio
+  procesamiento de SDR#. Ahora el callback solo copia el bloque a una cola acotada de
+  búferes reutilizados y vuelve; mezclador, remuestreador y `libnrsc5` corren en un hilo
+  propio, `NRSC-5 decoder`. Medido en vivo con un Airspy HF+ Discovery a 912 ksps: el hilo
+  IQ de SDR# pasa del 16,3 % al 5,2 % de un núcleo, y la parte del plugin en él baja al
+  0,3 %. El total del proceso no cambia: el trabajo se muda de núcleo, no desaparece.
+- **El Artwork sigue a la canción que suena.** Tres causas, todas vistas en vivo en XHTKR
+  103,7 MHz:
+  - Cuando la imagen correcta aún no había llegado, se mostraba la última imagen vista,
+    que era de otra canción: una cuña «LA KE BUENA / ESCUCHAS» salía con la foto de un
+    grupo. Ahora se muestra el logo hasta que llega la imagen que corresponde.
+  - Se ignoraba el parámetro del XHDR. El 1 significa «sin imagen» y la emisora lo usa en
+    las pistas sin portada; el 0 vincula un LOT concreto. Solo se da por bueno el XHDR de
+    una emisora que alguna vez vincula imágenes: hay emisoras que mandan 1 en todo.
+  - Título y Artwork cambiaban al decodificarse, adelantados al audio lo que dura el
+    búfer (0,75 s por defecto, hasta 10 s). Ahora se muestran cuando ese audio suena:
+    cada ID3 se marca con la posición del búfer y se libera al reproducirla.
+- **El logo correcto de cada subcanal.** XHTKR manda sus logos como JPEG y PNG normales
+  (`SLXHTKR$020001.png`), no con el tipo MIME de logo, así que se tomaban por portadas. El
+  logo se reconoce ahora por lo que la tabla SIG declara que lleva su puerto. Las imágenes
+  que llegan antes que la tabla SIG se asignan a su subcanal por el puerto en cuanto la
+  tabla aparece, en vez de pegarse al subcanal seleccionado.
+- **Remuestreador 1,1–1,3× más rápido que la 3.3.5, y 1,75× a 2,4–4,8 MS/s.** El banco de
+  coeficientes deja de duplicarse: el cuello era la memoria, no la aritmética. Dos
+  acumuladores, FMA y una reducción horizontal de tres instrucciones. Error máximo frente
+  a la 3.3.5: 3,6·10⁻⁷.
+- El tooltip de la línea IQ muestra la carga del hilo decodificador y del hilo de SDR#,
+  medidas por el propio plugin, y los bloques descartados si el decodificador no alcanza.
+- Traza de diagnóstico opcional de metadatos y carga: se activa creando
+  `%LOCALAPPDATA%\SDRSharp.NRSC5\trace.enabled`. [Detalles y mediciones](docs/RENDIMIENTO.md).
+
 ## Sin publicar — compilación de desarrollo 3.3.5
 
 - **Menor coste de CPU en la ruta IQ.** El remuestreador procesa cuatro coeficientes
